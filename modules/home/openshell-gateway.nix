@@ -73,7 +73,7 @@
           `~/.config/openshell/gateway.toml` (schema: OpenShell's "Gateway
           Configuration File" reference). Merged over defaults that bind
           the API to 127.0.0.1:`port`, select the `openshell.engine` driver,
-          allow the bind mount of `workspace.mount` and, for podman, map your
+          allow bind mounts (`workspace.mount`, dev shells) and, for podman, map your
           UID into sandboxes unchanged (`userns = "keep-id"`).
         '';
       };
@@ -87,7 +87,9 @@
           compute_drivers = lib.mkDefault [engine];
         };
         drivers.${engine} =
-          {enable_bind_mounts = lib.mkDefault top.workspace.mount;}
+          # The workspace mount and the dev shell mounts (the env dir and
+          # /nix/store; dev shells can be asked for per run, so always on).
+          {enable_bind_mounts = lib.mkDefault true;}
           # Rootless podman maps your UID to root in the container, so the
           # sandbox user (your UID, see policy-gen) could not write the
           # mounted project. keep-id maps it to itself.
@@ -109,7 +111,7 @@
           # The host's podman/docker CLI (the driver falls back to it to find
           # the API socket), with podman's setuid uidmap helpers.
           Environment = [
-            "PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+            "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.profileDirectory}/bin:/usr/bin:/bin"
             "OPENSHELL_GATEWAY_CONFIG=${config.xdg.configHome}/openshell/gateway.toml"
             "OPENSHELL_LOCAL_TLS_DIR=${tlsDir}"
           ];

@@ -153,9 +153,11 @@ in {
           };
           Service = {
             # The host's podman, with its setuid uidmap helpers.
-            Environment = ["PATH=/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin"];
+            Environment = ["PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.profileDirectory}/bin:/usr/bin:/bin"];
             ExecStart = "${start}";
-            ExecStop = "podman stop --time 75 agent-hindsight";
+            # A script, so podman resolves via the PATH above (systemd looks up
+            # bare commands on its own fixed path).
+            ExecStop = "${pkgs.writeShellScript "agent-hindsight-stop" "exec podman stop --time 75 agent-hindsight"}";
             # First start pulls a multi-GB image.
             TimeoutStartSec = "infinity";
             TimeoutStopSec = 90;
