@@ -358,7 +358,7 @@ in {
           ${lib.optionalString cfg.workspace.mount ''
             addMount "$PWD" ${lib.escapeShellArg cfg.workspace.target} false
           ''}
-          ${lib.optionalString hcfg.persist ''
+          ${lib.optionalString (hcfg.persist && (def.persists or false)) ''
             # One directory per project path, so sessions (all recorded under
             # the same sandbox cwd) stay apart and `--continue` finds them.
             persist="''${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/${name}-sandbox/projects/$(printf %s "$PWD" | sha256sum | cut -c1-16)"
@@ -580,6 +580,7 @@ in {
             Keep per-project state (sessions) across sandboxed runs, in
             $XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<hash of
             the project path>, mounted read-write; the agent can edit it.
+            Applies only to harnesses that declare `persists` (today: Pi).
           '';
         };
 

@@ -60,10 +60,12 @@ in {
                 openshell.gateway.enable = false;
                 openshell.package = fakeOpenshell;
                 harnesses.pi.enable = true;
+                harnesses.claude-code.enable = true;
               };
             }
           ];
         };
+        claudeWrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-claude-code") (throw "no agent-claude-code") hm.config.home.packages);
         wrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-pi") (throw "no agent-pi") hm.config.home.packages);
         # Records what the wrapper asked for: the arguments, the mounts, and
         # a copy of the dev shell env file (deleted when the wrapper exits).
@@ -234,6 +236,11 @@ in {
           mkdir other && cd other
           run other
           [ -n "$(persistSrc)" ] && [ "$(persistSrc)" != "$p1" ] || fail "persist dir shared across projects"
+          # A harness that does not declare `persists` gets no persist mount.
+          CASE=$TMPDIR/case-claude
+          mkdir -p "$CASE"
+          ${claudeWrapper} 2> "$CASE/err" || { cat "$CASE/err"; fail "claude wrapper failed"; }
+          [ -z "$(persistSrc)" ] || fail "claude-code got a persist mount"
           touch $out
         '';
 

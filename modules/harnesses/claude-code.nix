@@ -10,6 +10,10 @@
 #                    from extensions/<harness>/ (never listed by hand)
 #   supportsHost   : bool (optional, default false). Whether `launch` is
 #                    safe to run unsandboxed on the host (host.enable).
+#   persists       : bool (optional, default false). Whether the harness
+#                    keeps state in $AGENT_HARNESS_PERSIST, the per-project
+#                    directory the sandbox mounts at /sandbox/.persist
+#                    (harnesses.<h>.persist). Unset: nothing is mounted.
 #   launch         : { pkgs, package, skills, extensions, settings,
 #                      mcpConfig, llm } -> str  (takes the args it names)
 #                    Bash run inside the sandbox (HOME=/sandbox, cwd = the

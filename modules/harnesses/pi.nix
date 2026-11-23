@@ -32,6 +32,8 @@ in {
     defaultPackage = {flakePackages, ...}: flakePackages.pi-coding-agent;
     # launch writes only under $AGENT_HARNESS_STATE, never the real ~/.pi.
     supportsHost = true;
+    # Reads $AGENT_HARNESS_PERSIST (sessions), so the sandbox mounts it.
+    persists = true;
     extensions = hl.discoverDir ../../extensions/pi;
 
     launch = {
