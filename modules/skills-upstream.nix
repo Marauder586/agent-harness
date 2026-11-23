@@ -71,6 +71,12 @@
         (pkgs.python3.withPackages (ps: [ps.anthropic ps.tiktoken]))
       ];
     };
+
+    # morluto/rea → reverse-engineer-anything. Taken from the npm tarball,
+    # not the repo, so the skill matches the MCP server version
+    # (mcp-servers/rea.nix). The skill only describes the tools; select the
+    # `rea` MCP server alongside it.
+    rea.root = "${inputs.rea-agents}/skills";
   };
 in {
   flake.agentSkills = lib.mkMerge (lib.mapAttrsToList (_: s:

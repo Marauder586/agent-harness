@@ -12,9 +12,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    # ── Upstream skills (modules/skills-upstream.nix) ─────────
-    # The skill content of the Claude Code plugins enabled in nix-config's
-    # remote-ai.nix, pinned to the versions installed there. Source only.
+    # ── Upstream skills: see modules/skills-upstream.nix ──────
     claude-plugins-official = {
       url = "github:anthropics/claude-plugins-official";
       flake = false;
@@ -25,6 +23,46 @@
     };
     caveman = {
       url = "github:JuliusBrussee/caveman/v4.2.0";
+      flake = false;
+    };
+
+    # See mcp-servers/rea.nix (and its skill in modules/skills-upstream.nix).
+    rea-agents = {
+      url = "https://registry.npmjs.org/rea-agents/-/rea-agents-6.10.1.tgz";
+      flake = false;
+    };
+
+    # See extensions/pi/hindsight/.
+    hindsight-coding-agents = {
+      url = "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.8.8.tgz";
+      flake = false;
+    };
+
+    # See extensions/pi/mcp-adapter/.
+    pi-mcp-adapter = {
+      url = "https://registry.npmjs.org/pi-mcp-adapter/-/pi-mcp-adapter-7.0.1.tgz";
+      flake = false;
+    };
+
+    # See extensions/pi/subagents/. Not on npm (that name is another project).
+    pi-subagents = {
+      url = "github:edxeth/pi-subagents/v2.9.2";
+      flake = false;
+    };
+
+    # See extensions/pi/claude-bridge/.
+    pi-claude-bridge = {
+      url = "https://registry.npmjs.org/pi-claude-bridge/-/pi-claude-bridge-0.11.0.tgz";
+      flake = false;
+    };
+
+    # See extensions/pi/ask-user-question/ (the package and its one dependency).
+    rpiv-ask-user-question = {
+      url = "https://registry.npmjs.org/@juicesharp/rpiv-ask-user-question/-/rpiv-ask-user-question-2.15.0.tgz";
+      flake = false;
+    };
+    rpiv-config = {
+      url = "https://registry.npmjs.org/@juicesharp/rpiv-config/-/rpiv-config-2.15.0.tgz";
       flake = false;
     };
 

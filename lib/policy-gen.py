@@ -1,7 +1,7 @@
 """Generate an OpenShell sandbox policy from IP allowlist files.
 
 Usage:
-  policy-gen.py --uid UID --gid GID [--conf FILE]... [--system-conf FILE]
+  policy-gen.py --uid UID --gid GID [--conf FILE]... [--host-port PORT]...
 
 Each allowlist file has one entry per line:
 
@@ -9,11 +9,6 @@ Each allowlist file has one entry per line:
     <ip-or-cidr> [port[,port...]]     # ports default to 443
 
 --conf files are trusted as-is (they come from the Nix store).
---system-conf names the root-owned file (e.g. /etc/openshell/network.conf).
-It is optional: a missing file adds nothing. A present file is used only if
-it and every parent directory are owned by root and not group- or
-world-writable, so the sandboxed user cannot widen its own allowlist.
-Otherwise the run is refused.
 
 Entries are merged and grouped by port into hostless `allowed_ips` endpoints.
 OpenShell rejects overlapping endpoints whose `allowed_ips` differ, so there
@@ -22,13 +17,16 @@ allowlist: no TLS interception, and non-HTTP traffic such as SSH is relayed.
 Loopback, link-local and unspecified ranges are rejected here, because
 OpenShell would otherwise block every connection to the whole endpoint.
 
+Each --host-port adds an endpoint for `host.openshell.internal:<port>`, the
+host machine. OpenShell allows it only through its trusted-gateway check
+(rootless podman with pasta, where the alias is link-local), so a host port
+cannot also appear in an IP allowlist entry.
+
 Prints the policy as YAML on stdout.
 """
 
 import argparse
 import ipaddress
-import os
-import stat
 import sys
 from typing import NoReturn
 
@@ -48,29 +46,6 @@ FORBIDDEN = [
 def die(msg) -> NoReturn:
     print(f"agent-harness: {msg}", file=sys.stderr)
     sys.exit(1)
-
-
-def check_root_owned(path):
-    """Refuse a system allowlist the invoking user could have modified."""
-    real = os.path.realpath(path)
-    if real != path and real.startswith("/nix/store/"):
-        # NixOS environment.etc symlink into the immutable store.
-        return
-    st = os.lstat(path)
-    if not stat.S_ISREG(st.st_mode):
-        die(f"{path} must be a regular file")
-    checks = [path]
-    parent = os.path.dirname(path)
-    while parent and parent != "/":
-        checks.append(parent)
-        parent = os.path.dirname(parent)
-    checks.append("/")
-    for p in checks:
-        s = os.lstat(p)
-        if s.st_uid != 0:
-            die(f"refusing {path}: {p} is not owned by root")
-        if s.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            die(f"refusing {path}: {p} is group- or world-writable")
 
 
 def parse(path, entries):
@@ -109,7 +84,7 @@ def main():
     ap.add_argument("--uid", required=True)
     ap.add_argument("--gid", required=True)
     ap.add_argument("--conf", action="append", default=[])
-    ap.add_argument("--system-conf")
+    ap.add_argument("--host-port", action="append", type=int, default=[])
     a = ap.parse_args()
 
     for v in (a.uid, a.gid):
@@ -119,9 +94,13 @@ def main():
     entries = {}
     for c in a.conf:
         parse(c, entries)
-    if a.system_conf and os.path.lexists(a.system_conf):
-        check_root_owned(a.system_conf)
-        parse(a.system_conf, entries)
+
+    host_ports = sorted(set(a.host_port))
+    for p in host_ports:
+        if not 0 < p < 65536:
+            die(f"--host-port {p}: ports must be 1-65535")
+        if p in entries:
+            die(f"--host-port {p} is also an IP allowlist port; use one or the other")
 
     out = [
         "version: 1",
@@ -138,8 +117,14 @@ def main():
         f'  run_as_user: "{a.uid}"',
         f'  run_as_group: "{a.gid}"',
     ]
-    if entries:
+    if entries or host_ports:
         out += ["network_policies:", "  allowlist:", "    endpoints:"]
+        for port in host_ports:
+            out += [
+                "      - host: host.openshell.internal",
+                f"        port: {port}",
+                "        tls: skip",
+            ]
         for port in sorted(entries):
             out += [
                 f"      - port: {port}",

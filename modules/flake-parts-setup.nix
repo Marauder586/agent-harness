@@ -33,9 +33,10 @@
       type = lib.types.lazyAttrsOf lib.types.raw;
       default = {};
       description = ''
-        Harness-agnostic MCP servers, keyed by server name. Each value is
-        `{pkgs}: { description; server; packages ? []; }`, where `server` is
-        one entry of the shared `mcpServers` JSON format.
+        Harness-agnostic MCP servers, keyed by server name. Each value is a
+        function of any of `{pkgs, inputs, flakePackages, sandboxed}`
+        returning `{ description; server; packages ? []; }`, where `server`
+        is one entry of the shared `mcpServers` JSON format.
       '';
     };
 

@@ -51,6 +51,19 @@
         "type": "github"
       }
     },
+    "hindsight-coding-agents": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-zuYTNIDn5XCuSnJjDKxpupjE440Hqw1YrPztLFDfA1s=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.8.8.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.8.8.tgz"
+      }
+    },
     "home-manager": {
       "inputs": {
         "nixpkgs": [
@@ -134,15 +147,104 @@
         "type": "github"
       }
     },
+    "pi-claude-bridge": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-rXlQ1J2I2PTWedVcjAyqYbhdEjTvLY8c5/JlGAkbRf8=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/pi-claude-bridge/-/pi-claude-bridge-0.11.0.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/pi-claude-bridge/-/pi-claude-bridge-0.11.0.tgz"
+      }
+    },
+    "pi-mcp-adapter": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-FK1UY6zcCCqYLMKSJESq7DJQQtgWVUp5lJfBOnd+2KU=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/pi-mcp-adapter/-/pi-mcp-adapter-7.0.1.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/pi-mcp-adapter/-/pi-mcp-adapter-7.0.1.tgz"
+      }
+    },
+    "pi-subagents": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789719144,
+        "narHash": "sha256-Z95FzKiENUM8BsmkW3uiBNY97/+DTCaa94wA2XCAMcI=",
+        "owner": "edxeth",
+        "repo": "pi-subagents",
+        "rev": "cf6dbf41c17986f3882e6804a68e8fb8282d25e6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "edxeth",
+        "ref": "v2.9.2",
+        "repo": "pi-subagents",
+        "type": "github"
+      }
+    },
+    "rea-agents": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-C4iPchmp1pFVe7eCRJZoatRPHe08yp5T09DsAAjJbPk=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/rea-agents/-/rea-agents-6.10.1.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/rea-agents/-/rea-agents-6.10.1.tgz"
+      }
+    },
     "root": {
       "inputs": {
         "caveman": "caveman",
         "claude-plugins-official": "claude-plugins-official",
         "flake-parts": "flake-parts",
+        "hindsight-coding-agents": "hindsight-coding-agents",
         "home-manager": "home-manager",
         "impeccable": "impeccable",
         "import-tree": "import-tree",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "pi-claude-bridge": "pi-claude-bridge",
+        "pi-mcp-adapter": "pi-mcp-adapter",
+        "pi-subagents": "pi-subagents",
+        "rea-agents": "rea-agents",
+        "rpiv-ask-user-question": "rpiv-ask-user-question",
+        "rpiv-config": "rpiv-config"
+      }
+    },
+    "rpiv-ask-user-question": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-bHq4BM1Iib60+ta2Zrjnih445KUddAXNfGJwKRKOx1Q=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@juicesharp/rpiv-ask-user-question/-/rpiv-ask-user-question-2.15.0.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@juicesharp/rpiv-ask-user-question/-/rpiv-ask-user-question-2.15.0.tgz"
+      }
+    },
+    "rpiv-config": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-Z7QC661n6pbbY5J1/KuXqmagYMox6j96PYaX/bg4xRA=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@juicesharp/rpiv-config/-/rpiv-config-2.15.0.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@juicesharp/rpiv-config/-/rpiv-config-2.15.0.tgz"
       }
     }
   },

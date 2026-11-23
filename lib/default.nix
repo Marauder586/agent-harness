@@ -1,6 +1,10 @@
 # Plain helpers shared by the flake-parts modules. Not a module itself (lives
 # outside modules/, so import-tree never picks it up).
 {lib}: rec {
+  # Call `f` with only the attributes of `args` it names, so a
+  # `{pkgs}:` file keeps working when more arguments are offered.
+  callWith = f: args: f (builtins.intersectAttrs (lib.functionArgs f) args);
+
   # One allowlist entry: a CIDR (or bare IP) and the TCP ports it may be
   # reached on. A bare string is shorthand for port 443 only.
   allowEntryType = let
@@ -22,7 +26,7 @@
   in
     lib.types.coercedTo lib.types.str (cidr: {inherit cidr;}) entry;
 
-  # Render entries in the network.conf line format read by lib/policy-gen.py:
+  # Render entries in the allowlist line format read by lib/policy-gen.py:
   #   <ip-or-cidr> [port[,port...]]
   renderAllowConf = entries:
     lib.concatMapStrings (e: "${e.cidr} ${lib.concatMapStringsSep "," toString e.ports}\n") entries;
@@ -63,12 +67,23 @@
 
   # name -> path for every entry of `dir` (dotfiles skipped). A trailing
   # .ts/.js is dropped from file names, so extensions/pi/ws-edit.ts is
-  # selectable as "ws-edit". Missing dir yields {}.
+  # selectable as "ws-edit". A directory holding a default.nix is a
+  # Nix-built extension instead: its entry is that file's function, taking
+  # any of `{pkgs, inputs, flakePackages}` (see callWith), called by the
+  # home-manager module with the consumer's pkgs. Missing dir yields {}.
   discoverDir = dir:
     if !builtins.pathExists dir
     then {}
     else
       lib.mapAttrs'
-      (n: _: lib.nameValuePair (lib.removeSuffix ".js" (lib.removeSuffix ".ts" n)) (dir + "/${n}"))
+      (n: _: let
+        p = dir + "/${n}";
+      in
+        lib.nameValuePair (lib.removeSuffix ".js" (lib.removeSuffix ".ts" n))
+        (
+          if builtins.pathExists (p + "/default.nix")
+          then import p
+          else p
+        ))
       (lib.filterAttrs (n: _: !lib.hasPrefix "." n) (builtins.readDir dir));
 }

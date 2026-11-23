@@ -14,19 +14,25 @@
 #                      extensions = [ "ws-edit" ]; };
 #   };
 #
-# Each enabled harness gets a command (default `agent-<harness>`) that:
+# Each enabled harness gets a command (`command`, default `agent-<harness>`)
+# that:
 #   1. loads the harness's Nix-built OCI image into docker/podman if missing,
-#   2. builds an OpenShell policy from network.allow plus the root-owned
-#      network.allowFile (lib/policy-gen.py),
+#   2. builds an OpenShell policy from network.allow and network.hostPorts
+#      (lib/policy-gen.py),
 #   3. runs `openshell sandbox create --from <image> --policy <policy>
 #      --no-keep -- agent-launch "$@"`, with $PWD bind-mounted at
 #      /sandbox/work.
+#
+# Harnesses with `supportsHost = true` (pi) can also get an unsandboxed
+# command (`host.*`): the same launch script run on the host, writing only
+# under $XDG_STATE_HOME/agent-harness/<harness>. See README.md.
 #
 # Requires a running OpenShell gateway with the matching compute driver
 # (`openshell status`). Bind-mounting $PWD also needs the gateway opt-in
 # described in README.md.
 {
   config,
+  inputs,
   withSystem,
   ...
 }: let
@@ -82,44 +88,132 @@ in {
         ${lib.concatMapStrings (s: "cp -r ${skillsRegistry.${s}.src} $out/${s}\n") names}
       '';
 
+    # A registry extension is a path, or a function (extensions/<harness>/
+    # <name>/default.nix) that builds one from `pkgs`, `inputs` (this
+    # flake's inputs) and `flakePackages` (this flake's packages, e.g.
+    # claude-code, built with unfree allowed).
+    extensionArgs = {inherit pkgs inputs flakePackages;};
+    buildExtension = e:
+      if lib.isFunction e
+      then hl.callWith e extensionArgs
+      else e;
+
+    # Tools an extension needs at run time (its passthru.packages), put on
+    # PATH whenever it is selected. Plain-file extensions have none.
+    extensionPackages = e: e.packages or [];
+
+    # Host files read into environment variables at each launch
+    # (secretEnvFiles), as shell lines for the sandbox and host wrappers.
+    secretFiles =
+      lib.mapAttrsToList (n: f: {
+        inherit n;
+        f = lib.escapeShellArg f;
+      })
+      cfg.secretEnvFiles;
+
+    exports = env: lib.concatStrings (lib.mapAttrsToList (k: v: "export ${lib.toShellVar k v}\n") env);
+
     mkHarness = name: hcfg: let
       def = harnessRegistry.${name};
       skillsDir = mkSkillsDir name hcfg.skills;
+      buildNamed = names: map (e: buildExtension def.extensions.${e}) (lib.unique names);
+      extensions = buildNamed hcfg.extensions ++ hcfg.extraExtensions;
+      hostExtensions = extensions ++ buildNamed (lib.subtractLists hcfg.extensions hcfg.host.extensions);
 
       # Selected MCP servers, evaluated against the consumer's pkgs, and
-      # rendered once as the shared `mcpServers` JSON every harness reads.
-      mcp = lib.genAttrs hcfg.mcpServers (s: mcpRegistry.${s} {inherit pkgs;});
-      mcpConfig =
-        if mcp == {}
+      # rendered as the shared `mcpServers` JSON every harness reads. The
+      # host command gets its own copy built with `sandboxed = false`.
+      mcpFor = sandboxed:
+        lib.genAttrs hcfg.mcpServers (s:
+          hl.callWith mcpRegistry.${s} (extensionArgs // {inherit sandboxed;}));
+      mcp = mcpFor true;
+      renderMcp = file: servers:
+        if servers == {}
         then null
         else
-          pkgs.writeText "agent-${name}-mcp.json" (builtins.toJSON {
+          pkgs.writeText file (builtins.toJSON {
             mcpServers = lib.mapAttrs (_: m:
               m.server
               // lib.optionalAttrs (m ? description) {inherit (m) description;})
-            mcp;
+            servers;
           });
+      mcpConfig = renderMcp "agent-${name}-mcp.json" mcp;
+      # Host servers may name "@AGENT_HARNESS_STATE@"; the host wrapper
+      # fills it in and writes the result here.
+      hostMcpTemplate = renderMcp "agent-${name}-host-mcp.json" (mcpFor false);
+      hostMcpConfig =
+        if hostMcpTemplate == null
+        then null
+        else ''"$AGENT_HARNESS_STATE/mcp-servers.json"'';
+
+      launchScript = exts: mcpConfig:
+        hl.callWith def.launch {
+          inherit pkgs mcpConfig;
+          inherit (hcfg) package settings;
+          skills = skillsDir;
+          extensions = exts;
+          llm = cfg.llm;
+        };
 
       launcher = pkgs.writeShellScriptBin "agent-launch" ''
         set -eu
         export HOME=/sandbox
+        export AGENT_HARNESS_STATE="$HOME/.${name}"
+        ${exports hcfg.environment}
         cd ${cfg.workspace.target} 2>/dev/null || cd "$HOME"
-        ${def.launch {
-          inherit pkgs mcpConfig;
-          inherit (hcfg) package settings;
-          skills = skillsDir;
-          extensions = map (e: def.extensions.${e}) hcfg.extensions;
-        }}
+        ${launchScript extensions mcpConfig}
+      '';
+
+      # Everything a harness run needs on PATH, besides the harness itself.
+      toolPaths = exts:
+        baseTools
+        ++ lib.concatMap (s: skillsRegistry.${s}.packages pkgs) hcfg.skills
+        ++ lib.concatMap (m: m.packages or []) (lib.attrValues mcp)
+        ++ lib.concatMap extensionPackages exts
+        ++ hcfg.extraPackages;
+
+      # Unsandboxed: same launch script, run on the host as the user.
+      hostEnv = pkgs.buildEnv {
+        name = "agent-${name}-host-env";
+        paths = toolPaths hostExtensions;
+      };
+      # Only the harness's own binary, under its real name. It goes first on
+      # PATH so a child started by name (e.g. pi-subagents' `pi` fallback)
+      # gets the real harness, not a same-named command in home.packages
+      # (such as the sandboxed wrapper, when `command` is the harness name).
+      # It holds nothing else, so the user's other tools stay unshadowed;
+      # the harness's other tools (hostEnv) go after the user's own PATH.
+      hostBin = let
+        exe = lib.getExe hcfg.package;
+      in
+        pkgs.runCommand "agent-${name}-host-bin" {} ''
+          mkdir -p $out/bin
+          ln -s ${exe} $out/bin/${baseNameOf exe}
+        '';
+      hostWrapper = pkgs.writeShellScriptBin hcfg.host.command ''
+        set -eu
+        # hostBin first, the harness's tools after the user's PATH (see hostBin).
+        export PATH="${hostBin}/bin:''${PATH:+$PATH:}${hostEnv}/bin"
+        ${exports (hcfg.environment // hcfg.host.environment)}
+        ${lib.concatMapStrings (s: ''
+            ${s.n}=$(cat ${s.f})
+            export ${s.n}
+          '')
+          secretFiles}
+        export AGENT_HARNESS_STATE="''${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/${name}"
+        mkdir -p "$AGENT_HARNESS_STATE"
+        ${lib.optionalString (hostMcpTemplate != null) ''
+          ${lib.getExe pkgs.jq} --arg s "$AGENT_HARNESS_STATE" \
+            'walk(if type == "string" then gsub("@AGENT_HARNESS_STATE@"; $s) else . end)' \
+            ${hostMcpTemplate} > ${hostMcpConfig}
+        ''}
+        set -- ${lib.escapeShellArgs hcfg.extraArgs} "$@"
+        ${launchScript hostExtensions hostMcpConfig}
       '';
 
       env = pkgs.buildEnv {
         name = "agent-${name}-env";
-        paths =
-          [hcfg.package launcher]
-          ++ baseTools
-          ++ lib.concatMap (s: skillsRegistry.${s}.packages pkgs) hcfg.skills
-          ++ lib.concatMap (m: m.packages or []) (lib.attrValues mcp)
-          ++ hcfg.extraPackages;
+        paths = [hcfg.package launcher] ++ toolPaths extensions;
       };
 
       # Store paths are referenced from `config`, so they land in the image
@@ -162,7 +256,7 @@ in {
           python3 -I ${policyGen} \
             --uid "$(id -u)" --gid "$(id -g)" \
             --conf ${allowConf} \
-            ${lib.optionalString (cfg.network.allowFile != null) "--system-conf ${lib.escapeShellArg cfg.network.allowFile}"} \
+            ${lib.concatMapStringsSep " " (p: "--host-port ${toString p}") cfg.network.hostPorts} \
             > "$policy"
 
           base=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '-' | tr -s '-')
@@ -177,6 +271,10 @@ in {
               if [ -n "''${${v}+set}" ]; then args+=(--env "${v}=''${${v}}"); fi
             '')
             hcfg.envFrom}
+          ${lib.concatMapStrings (s: ''
+              args+=(--env "${s.n}=$(cat ${s.f})")
+            '')
+            secretFiles}
           ${lib.optionalString cfg.workspace.mount ''
             mount=$(jq -cn --arg src "$PWD" --arg dst ${lib.escapeShellArg cfg.workspace.target} \
               '{${cfg.openshell.engine}: {mounts: [{type: "bind", source: $src, target: $dst, read_only: false}]}}')
@@ -185,7 +283,10 @@ in {
           openshell "''${args[@]}" -- agent-launch ${lib.escapeShellArgs hcfg.extraArgs} "$@"
         '';
       };
-    in {inherit image wrapper;};
+    in {
+      inherit image wrapper;
+      hostWrappers = lib.optional hcfg.host.enable hostWrapper;
+    };
 
     built = lib.mapAttrs mkHarness enabled;
 
@@ -200,10 +301,35 @@ in {
           description = "The ${name} package to put in the sandbox image.";
         };
 
+        host = {
+          enable = lib.mkEnableOption "an unsandboxed ${name} command on the host, with the same configuration";
+          command = lib.mkOption {
+            type = lib.types.str;
+            default = name;
+            description = ''
+              Name of the unsandboxed host command. Must differ from
+              `command`; when `command` takes the harness name, pick another
+              (e.g. `${name}-unleashed`).
+            '';
+          };
+          extensions = lib.mkOption {
+            type = lib.types.listOf (lib.types.enum (lib.attrNames def.extensions));
+            default = [];
+            example = ["claude-bridge"];
+            description = "Extensions loaded only by the host command (e.g. ones that need the host's own logins).";
+          };
+          environment = lib.mkOption {
+            type = lib.types.attrsOf lib.types.str;
+            default = {};
+            description = "Overrides of `environment` for the host command (e.g. host URLs instead of host.openshell.internal).";
+          };
+        };
+
         command = lib.mkOption {
           type = lib.types.str;
           default = "agent-${name}";
-          description = "Name of the host command that starts ${name} in a sandbox.";
+          example = name;
+          description = "Name of the command that starts ${name} in a sandbox (on the host's PATH).";
         };
 
         skills = lib.mkOption {
@@ -251,6 +377,27 @@ in {
             OpenShell providers to attach (`--provider`). This is the safe way
             to give the agent API keys: it sees a placeholder, and OpenShell
             injects the real key only toward the provider's endpoints.
+          '';
+        };
+
+        environment = lib.mkOption {
+          type = lib.types.attrsOf lib.types.str;
+          default = {};
+          example = {HINDSIGHT_SERVER_MODE = "self-hosted";};
+          description = ''
+            Fixed environment variables set inside the sandbox before the
+            harness starts. They are baked into the image's launcher, so
+            the agent can read them: never put secrets here.
+          '';
+        };
+
+        extraExtensions = lib.mkOption {
+          type = lib.types.listOf (lib.types.either lib.types.path lib.types.package);
+          default = [];
+          description = ''
+            Extension files or directories from outside this flake's
+            extensions/ directory (e.g. one built from an npm package), loaded
+            after `extensions`.
           '';
         };
 
@@ -302,22 +449,36 @@ in {
           ];
           description = ''
             IP ranges every sandbox may connect to. A bare string allows port
-            443 only. Merged with `allowFile`. Everything else is denied.
+            443 only. Everything else is denied.
           '';
         };
 
-        allowFile = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = "/etc/openshell/network.conf";
+        hostPorts = lib.mkOption {
+          type = lib.types.listOf lib.types.port;
+          default = [];
+          example = [9077];
           description = ''
-            Root-owned allowlist read at every launch, same line format as
-            the generated one (`<ip-or-cidr> [port,...]`). A missing file adds
-            nothing. A file not owned by root, or writable by anyone but
-            root, makes the launch fail. Set it with the
-            `openshell-network` NixOS module, or by hand on other distros.
-            Null disables it.
+            TCP ports on the host machine the sandbox may reach, as
+            `host.openshell.internal:<port>`. Needs a rootless podman
+            gateway, and the service must listen on a non-loopback address
+            (see README.md).
           '';
         };
+      };
+
+      secretEnvFiles = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = {};
+        example = {OPENAI_API_KEY = "/run/secrets/openai-key";};
+        description = ''
+          Environment variables whose values are read from host files at
+          each launch (variable name -> file): passed into every sandbox
+          with `--env`, exported by host commands. Unlike `envFrom` the
+          value never comes from your shell. The agent can still read it,
+          and it shows in the host process list while the sandbox CLI
+          runs; use a harness's `providers` for keys the agent must not
+          see. llm.nix fills this from each provider's `apiKeyFile`.
+        '';
       };
 
       workspace = {
@@ -377,7 +538,26 @@ in {
     };
 
     config = lib.mkIf (enabled != {}) {
-      home.packages = [cfg.openshell.package] ++ lib.mapAttrsToList (_: b: b.wrapper) built;
+      assertions =
+        lib.concatMap (n: let
+          h = enabled.${n};
+        in [
+          {
+            assertion = !h.host.enable || (harnessRegistry.${n}.supportsHost or false);
+            message = "programs.agent-harness.harnesses.${n}.host: ${n} has no unsandboxed mode (its launch would write into the real HOME).";
+          }
+          {
+            assertion = !h.host.enable || h.command != h.host.command;
+            message = "programs.agent-harness.harnesses.${n}: `command` and `host.command` are both \"${h.command}\"; give the sandboxed and the host command different names.";
+          }
+        ]) (lib.attrNames enabled)
+        ++ map (n: {
+          assertion = builtins.match "[A-Za-z_][A-Za-z0-9_]*" n != null;
+          message = "programs.agent-harness.secretEnvFiles: \"${n}\" is not a valid environment variable name.";
+        }) (lib.attrNames cfg.secretEnvFiles);
+      home.packages =
+        [cfg.openshell.package]
+        ++ lib.concatMap (b: [b.wrapper] ++ b.hostWrappers) (lib.attrValues built);
     };
   };
 
