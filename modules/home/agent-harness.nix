@@ -252,6 +252,22 @@ in {
         name = hcfg.command;
         runtimeInputs = [cfg.openshell.package pkgs.jq pkgs.python3 pkgs.coreutils];
         text = ''
+          ${lib.optionalString cfg.openshell.gateway.enable ''
+            # The gateway service starts with the user session, but a switch
+            # may not have started it (or it stopped): start it on demand.
+            if ! systemctl --user is-active --quiet openshell-gateway; then
+              echo "agent-harness: starting openshell-gateway" >&2
+              if ! systemctl --user start openshell-gateway; then
+                echo "agent-harness: see 'journalctl --user -u openshell-gateway'" >&2
+                exit 1
+              fi
+              # `openshell status` exits 0 even when unreachable; wait for the port.
+              for _ in $(seq 30); do
+                (: </dev/tcp/127.0.0.1/${toString cfg.openshell.gateway.port}) 2>/dev/null && break
+                sleep 1
+              done
+            fi
+          ''}
           ref=${lib.escapeShellArg imageRef}
           if ! ${engine} image inspect "$ref" >/dev/null 2>&1; then
             echo "agent-harness: loading $ref into ${cfg.openshell.engine}" >&2
@@ -266,9 +282,14 @@ in {
             ${lib.concatMapStringsSep " " (p: "--host-port ${toString p}") cfg.network.hostPorts} \
             > "$policy"
 
+          # <harness>-<dir>-<6 hex>, at most 19 chars: OpenShell's limit for
+          # sandbox names (MAX_ROUTABLE_NAME_LEN). The dir part is cut to fit.
+          rand=$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')
           base=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '-' | tr -s '-')
-          name="${name}-''${base#-}"
-          name="''${name:0:50}-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+          base=''${base#-}
+          room=$((19 - ${toString (lib.stringLength name)} - 8))
+          if [ "$room" -gt 0 ]; then base=''${base:0:room}; base=''${base%-}; else base=""; fi
+          name="${name}''${base:+-$base}-$rand"
 
           args=(sandbox create --name "$name" --from "$ref" --policy "$policy")
           ${lib.optionalString (!hcfg.keep) "args+=(--no-keep)"}
