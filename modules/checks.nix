@@ -145,6 +145,7 @@ in {
       in
         pkgs.runCommand "check-devshell" {nativeBuildInputs = [fakePodman fakeDirenv fakeNix pkgs.jq];} ''
           fail() { echo "devshell check, case $c: $*"; exit 1; }
+          export HOME=$TMPDIR/home XDG_STATE_HOME=$TMPDIR/state
           run() {
             c=$1
             shift
@@ -223,6 +224,16 @@ in {
           FAKE_FLAKE=1 run flake
           [ "$(cat "$CASE/installable")" = "$PWD#devShells.${pkgs.stdenv.hostPlatform.system}.default" ] || fail installable
           storeMounted || fail "no /nix/store mount"
+
+          # Per-project persistent state: read-write, one dir per project path.
+          persistSrc() { jq -r '.podman.mounts[] | select(.target == "/sandbox/.persist" and (.read_only | not)) | .source' "$CASE/mounts.json"; }
+          p1=$(persistSrc)
+          [ -d "$p1" ] && [ "$(cat "$p1/.path")" = "$PWD" ] || fail "persist dir"
+          run none-again
+          [ "$(persistSrc)" = "$p1" ] || fail "persist dir differs for the same project"
+          mkdir other && cd other
+          run other
+          [ -n "$(persistSrc)" ] && [ "$(persistSrc)" != "$p1" ] || fail "persist dir shared across projects"
           touch $out
         '';
 

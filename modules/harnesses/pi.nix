@@ -80,6 +80,10 @@ in {
       agentsDirs = lib.unique (lib.concatMap (e: lib.optional (e ? piAgentsDir) e.piAgentsDir) extensions);
     in ''
       export PI_CODING_AGENT_DIR="$AGENT_HARNESS_STATE/agent"
+      # Sandbox: sessions in the per-project persistent mount, if any.
+      if [ -n "''${AGENT_HARNESS_PERSIST:-}" ]; then
+        export PI_CODING_AGENT_SESSION_DIR="$AGENT_HARNESS_PERSIST/sessions"
+      fi
       export PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
       mkdir -p "$PI_CODING_AGENT_DIR"
       cp --no-preserve=mode ${settingsFile} "$PI_CODING_AGENT_DIR/settings.json"

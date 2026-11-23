@@ -179,6 +179,7 @@ programs.agent-harness.harnesses.claude-code = {
 | `providers` | `[]` | OpenShell providers to attach. The safe way to pass API keys: the agent sees a placeholder. |
 | `envFrom` | `[]` | Host variables copied in. The agent can read them, so don't use this for secrets. |
 | `autoProviders` | `false` | Let OpenShell attach providers it detects. |
+| `persist` | `true` | Keep per-project state across sandboxed runs (see [Sessions](#sessions)). |
 | `keep` | `false` | Keep the sandbox after exit. |
 | `extraArgs` | `[]` | Arguments always passed to the harness. |
 | `host.enable` / `host.command` / `host.extensions` / `host.environment` | off / harness name / `[]` / `{}` | The [unsandboxed host command](#unsandboxed-host-command). `host.command` must differ from `command`. |
@@ -235,6 +236,10 @@ programs.agent-harness.harnesses.pi = {
 | `secretEnvFiles` (API keys) | passed with `--env` | exported into the process; never on a command line |
 
 `host.environment` overrides `environment` for the host; Hindsight uses it to point the host command at `http://127.0.0.1:9077`. Harness tools go after your PATH; only a directory holding the harness binary itself goes first, so a child started by name (e.g. pi-subagents' `pi` fallback) gets the real harness, not a same-named sandboxed command. Claude Code has no host mode, because its launch writes skills into `~/.claude`.
+
+### Sessions
+
+The sandbox is deleted on exit, so per-project state lives on the host: `$XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<hash of the project path>/` (its `.path` file names the project), mounted read-write at `/sandbox/.persist`. Pi keeps its sessions there, so `pi -c`, `pi --resume` and `/resume` work per project. Every sandbox sees the project as `/sandbox/work`, which is why the directory is keyed by the host path. The agent can read and edit this directory. Sandboxed and host (`pi-unleashed`) sessions stay separate. Turn it off with `harnesses.<h>.persist = false`.
 
 ### Dev shells
 

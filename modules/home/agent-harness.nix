@@ -64,6 +64,9 @@ in {
     # directory holding `env`), read-only. Under /sandbox, which the
     # policy's workdir rule already makes readable.
     devshellDir = "/sandbox/.devshell";
+    # Per-project persistent state (sessions), mounted read-write from
+    # $XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<hash>.
+    persistDir = "/sandbox/.persist";
 
     # Tools every sandbox gets, whatever the harness: a shell and coreutils
     # for the agent's bash tool, git, and the search tools Pi otherwise
@@ -172,6 +175,7 @@ in {
         # variables the sandbox does not already have, and prepends its PATH.
         # `environment` below still wins.
         if [ -f ${devshellDir}/env ]; then . ${devshellDir}/env; fi
+        if [ -d ${persistDir} ]; then export AGENT_HARNESS_PERSIST=${persistDir}; fi
         ${exports hcfg.environment}
         cd ${cfg.workspace.target} 2>/dev/null || cd "$HOME"
         ${launchScript extensions mcpConfig}
@@ -353,6 +357,14 @@ in {
           }
           ${lib.optionalString cfg.workspace.mount ''
             addMount "$PWD" ${lib.escapeShellArg cfg.workspace.target} false
+          ''}
+          ${lib.optionalString hcfg.persist ''
+            # One directory per project path, so sessions (all recorded under
+            # the same sandbox cwd) stay apart and `--continue` finds them.
+            persist="''${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/${name}-sandbox/projects/$(printf %s "$PWD" | sha256sum | cut -c1-16)"
+            mkdir -p "$persist"
+            printf '%s\n' "$PWD" > "$persist/.path"
+            addMount "$persist" ${persistDir} false
           ''}
 
           # Dev shell: evaluated on the host, its environment written to
@@ -559,6 +571,16 @@ in {
           type = lib.types.bool;
           default = false;
           description = "Let OpenShell auto-attach providers it detects (off: only `providers` are attached).";
+        };
+
+        persist = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            Keep per-project state (sessions) across sandboxed runs, in
+            $XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<hash of
+            the project path>, mounted read-write; the agent can edit it.
+          '';
         };
 
         keep = lib.mkOption {
