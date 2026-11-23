@@ -11,7 +11,10 @@
 #     commands are <name>-unleashed: the case hostBin's PATH ordering
 #     (modules/home/agent-harness.nix) exists for, checked here. The host
 #     mcp.json must not disable Chromium's sandbox. A few broken configs
-#     are evaluated too, to check their assertions fire.
+#     are evaluated too, to check their assertions fire. The gateway
+#     service and its gateway.toml are checked, and the gateway is started
+#     on that config (with no container engine) to prove it parses.
+#   - openshell-gateway: the gateway builds, at the CLI's version.
 {
   inputs,
   config,
@@ -23,8 +26,23 @@
   hmModule = config.flake.modules.homeManager.agent-harness;
   hostCmd = n: "${n}-unleashed";
 in {
-  perSystem = {pkgs, ...}: {
+  perSystem = {
+    pkgs,
+    self',
+    ...
+  }: {
     checks = {
+      openshell-gateway = let
+        gw = self'.packages.openshell-gateway;
+        cli = self'.packages.openshell;
+      in
+        assert gw.version == cli.version || throw "openshell-gateway ${gw.version} != openshell ${cli.version}";
+          pkgs.runCommand "check-openshell-gateway" {} ''
+            ${lib.getExe gw} --version | grep -F ${cli.version}
+            ${lib.getExe cli} --version | grep -F ${cli.version}
+            touch $out
+          '';
+
       skill-names = pkgs.runCommand "check-skill-names" {} ''
         ${lib.concatMapStrings (n: ''
             grep -qx 'name: ${n}' ${config.flake.agentSkills.${n}.src}/SKILL.md \
@@ -152,12 +170,42 @@ in {
           || throw "checks.home-manager: assertion for ${n} did not fire")
         mustFail;
 
+        # Gateway service and config. The config is validated by starting
+        # the gateway on it: it must get past parsing (gateway and driver
+        # tables are deny_unknown_fields) to the podman socket probe, which
+        # fails in the build sandbox.
+        gwSvc = hm.config.systemd.user.services.openshell-gateway;
+        gwToml = hm.config.xdg.configFile."openshell/gateway.toml".source;
+        gwPkg = hm.config.programs.agent-harness.openshell.gateway.package;
+        noGateway =
+          (hmEval {
+            harnesses.pi.enable = true;
+            openshell.gateway.enable = false;
+          }).config.systemd.user.services
+          ? openshell-gateway;
+
         hostHarnesses = lib.filterAttrs (_: def: def.supportsHost or false) harnesses;
         exeOf = cmd: lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == cmd) (throw "no ${cmd} in home.packages") hm.config.home.packages);
       in
         assert lib.all lib.id failed;
+        assert !noGateway || throw "checks.home-manager: openshell.gateway.enable = false still defines the service";
+        assert lib.hasInfix "--server-san host.openshell.internal" (toString gwSvc.Service.ExecStartPre);
+        assert toString gwSvc.Service.ExecStart == lib.getExe gwPkg;
+        assert lib.elem "podman.socket" gwSvc.Unit.Wants;
           pkgs.runCommand "check-home-manager" {} ''
             mkdir $out
+            cp ${gwToml} $out/gateway.toml
+            grep -qx 'compute_drivers = \["podman"\]' ${gwToml}
+            grep -qx 'bind_address = "127.0.0.1:17670"' ${gwToml}
+            grep -qx 'enable_bind_mounts = true' ${gwToml}
+            grep -qx 'userns = "keep-id"' ${gwToml}
+            export HOME=$TMPDIR/home OPENSHELL_LOCAL_TLS_DIR=$TMPDIR/tls
+            ${lib.getExe gwPkg} generate-certs --output-dir $OPENSHELL_LOCAL_TLS_DIR --server-san host.openshell.internal
+            rc=0
+            timeout 20 ${lib.getExe gwPkg} --config ${gwToml} > gw.log 2>&1 || rc=$?
+            cat gw.log
+            [ $rc = 124 ] || grep -q 'responsive Podman API socket found' gw.log \
+              || { echo "gateway rejected ${gwToml}"; exit 1; }
             ${lib.concatMapStrings (n: "ln -s ${exeOf n} $out/${n}\n") (lib.attrNames harnesses)}
             ${lib.concatMapStrings (n: let
               exe = lib.getExe hm.config.programs.agent-harness.harnesses.${n}.package;

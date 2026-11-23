@@ -22,24 +22,23 @@ Contents:
 
 ### 1. Prerequisites
 
-The flake installs the `openshell` CLI, but not the gateway that runs sandboxes. Set that up first:
+On home-manager the flake runs the OpenShell gateway for you (`openshell.gateway`, on by default): a systemd user service `openshell-gateway`, built from the same source and version as the `openshell` CLI, on `https://127.0.0.1:17670` with mTLS, registered with the CLI as `openshell`. You only need:
 
-- **A running OpenShell gateway.** Use OpenShell's installer, or `openshell gateway add`. `openshell status` must show it.
-- **A container engine the gateway uses.** Rootless podman is recommended, and Hindsight requires it. On NixOS, `virtualisation.podman.enable = true`.
-- **Bind mounts allowed.** The current directory is bind-mounted read-write at `/sandbox/work`. The gateway's driver config must allow this:
+- **A container engine.** Rootless podman is recommended, and Hindsight requires it. On NixOS, `virtualisation.podman.enable = true`: it provides the podman 5.x user API socket (`podman.socket`) the gateway's driver talks to, and cgroups v2. Set `openshell.engine` to match.
+- **Optional: lingering** (`users.users.<you>.linger = true` on NixOS) keeps the gateway running after you log out.
 
-  ```toml
-  [openshell.drivers.podman]   # or .docker
-  allow_driver_config = true
-  enable_bind_mounts = true
+After the first switch, `openshell status` must show the gateway. If it doesn't, see `journalctl --user -u openshell-gateway`.
 
-  [openshell.drivers.podman.resource_admission]
-  enabled = false
-  ```
+**Your own gateway instead** (non-NixOS, a remote gateway, OpenShell's installer): set `openshell.gateway.enable = false`, register it with `openshell gateway add`, and check `openshell status`. Its driver must allow the bind mount of the current directory (read-write at `/sandbox/work`):
 
-  Alternatively, set `programs.agent-harness.workspace.mount = false` and copy files in and out with `openshell sandbox upload` and `openshell sandbox download`.
+```toml
+[openshell.drivers.podman]   # or .docker
+enable_bind_mounts = true
+```
 
-- **Rootless podman:** the sandbox runs as your host UID and GID, which keeps files in the mounted project owned by you. Under rootless podman those IDs are remapped, so check file ownership after a first run.
+Alternatively, set `programs.agent-harness.workspace.mount = false` and copy files in and out with `openshell sandbox upload` and `openshell sandbox download`.
+
+- **Rootless podman:** the sandbox runs as your host UID and GID, which keeps files in the mounted project owned by you. Rootless podman maps your UID to root inside containers, so the sandbox user could not write the project; the flake's gateway sets `userns = "keep-id"` on the podman driver to map it to itself. With your own gateway, add that line to its `[openshell.drivers.podman]` table.
 
 ### 2. Add the flake input
 
@@ -185,6 +184,21 @@ programs.agent-harness.harnesses.claude-code = {
 | `host.enable` / `host.command` / `host.extensions` / `host.environment` | off / harness name / `[]` / `{}` | The [unsandboxed host command](#unsandboxed-host-command). `host.command` must differ from `command`. |
 
 Shared options: `secretEnvFiles` (variable name to host file; see [API keys](#llm-providers)), `openshell.engine` (`"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target`, and `image.base`.
+
+### Gateway
+
+`openshell.gateway` runs the local gateway as the systemd user service `openshell-gateway` while any harness is enabled.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `enable` | `true` | Run and register the gateway. Set `false` to bring your own. |
+| `package` | this flake's build | `openshell-gateway`; keep its version equal to `openshell.package`. |
+| `port` | `17670` | Loopback port of the mTLS API. |
+| `settings` | see below | Written to `~/.config/openshell/gateway.toml`. |
+
+`settings` defaults to `bind_address = "127.0.0.1:<port>"`, `compute_drivers = [<engine>]`, `[openshell.drivers.<engine>] enable_bind_mounts = <workspace.mount>` and, for podman, `userns = "keep-id"`; anything you set is merged over that. Extra `OPENSHELL_*` variables and secrets (such as `OPENSHELL_DB_URL`) go in `~/.config/openshell/gateway.env`.
+
+On each start the service generates the local PKI if missing (`openshell-gateway generate-certs`: server certificate and CA under `~/.local/state/openshell/tls`, client bundle under `~/.config/openshell/gateways/openshell/mtls`), then runs `openshell gateway add https://127.0.0.1:<port> --local --name openshell` unless a gateway named `openshell` is already registered. The API is loopback-only and needs the client certificate, which only your user can read, so other local users cannot drive it. For sandbox callbacks the rootless podman driver opens a second TLS listener on the same port of the host's default-route address, limited to the sandbox gRPC calls and authenticated with gateway-minted sandbox tokens; keep that port closed in the host firewall (the NixOS default).
 
 ### Unsandboxed host command
 
@@ -360,7 +374,7 @@ Rules for anything you add: pin its source (a `flake = false` input or a fixed-o
 
 ## Maintenance
 
-**Images.** Each harness image is a pinned `debian:bookworm-slim` with the harness and its tool closure layered on top; OpenShell does not support scratch or distroless images. Images are built by Nix and loaded into the engine on first launch. `programs.agent-harness.images.<harness>` exposes each image's stream script, for pushing to a remote gateway's registry.
+**Images.** Each harness image is a pinned `debian:bookworm-slim` with the harness and its tool closure layered on top; OpenShell does not support scratch or distroless images. Its supervisor needs `ip` and `nft` at fixed paths, so `/usr/sbin/ip` and `/usr/sbin/nft` link into Nix's iproute2 and nftables. Images are built by Nix and loaded into the engine on first launch. `programs.agent-harness.images.<harness>` exposes each image's stream script, for pushing to a remote gateway's registry.
 
 **Updating.** In your config, `nix flake update agent-harness` picks up a new revision of this flake. Inside this repo, every upstream is a pinned input: `nix flake update <input>` bumps one (`caveman`, `impeccable`, `rea-agents`, and so on). An npm tarball input is pinned by its URL, so change the version in `flake.nix`. For `mcp-adapter` and `claude-bridge`, also regenerate the lockfile as described in its `default.nix` and update `npmDepsHash`. The Hindsight server image is pinned by digest in `hindsight.image`.
 
@@ -370,7 +384,7 @@ Rules for anything you add: pin its source (a `flake = false` input or a fixed-o
 nix flake check
 ```
 
-The checks verify that skill names match their directories, test the policy generator (including the cases it must reject), and build every harness wrapper through home-manager with every skill, extension, MCP server, an LLM registry and Hindsight turned on. That build names each sandboxed command after its harness and host commands `<name>-unleashed`, and checks that the host command puts only the real harness binary ahead of your PATH and that its `mcp.json` keeps Chromium's sandbox. It also evaluates broken configs (a loopback provider, a `default` with no providers) and checks their assertions fire.
+The checks verify that skill names match their directories, test the policy generator (including the cases it must reject), and build every harness wrapper through home-manager with every skill, extension, MCP server, an LLM registry and Hindsight turned on. That build names each sandboxed command after its harness and host commands `<name>-unleashed`, and checks that the host command puts only the real harness binary ahead of your PATH and that its `mcp.json` keeps Chromium's sandbox. It also evaluates broken configs (a loopback provider, a `default` with no providers) and checks their assertions fire. The gateway checks build `openshell-gateway` at the CLI's version, check the generated `openshell-gateway` service, and start the gateway on the generated `gateway.toml` to prove it parses (it gets as far as looking for the podman socket).
 
 **Troubleshooting.**
 
@@ -378,6 +392,7 @@ The checks verify that skill names match their directories, test the policy gene
 |---|---|
 | `agent-<harness>` can't reach the gateway | `openshell status`. |
 | Image load fails | `openshell.engine` matches the gateway's driver. |
-| The project directory isn't mounted | The gateway's `enable_bind_mounts` and `allow_driver_config`. |
+| The project directory isn't mounted | The gateway's `enable_bind_mounts` (`openshell.gateway.settings`). |
+| `openshell status` shows no gateway | `systemctl --user status openshell-gateway`, and `journalctl --user -u openshell-gateway`. |
 | A request is blocked | The address and port are in `network.allow`. Hostnames must resolve inside the list. |
 | Pi runs without memory | `systemctl --user status agent-hindsight`, and that an LLM is set (rebuilds warn when it isn't). |

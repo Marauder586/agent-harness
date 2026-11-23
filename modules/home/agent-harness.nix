@@ -27,9 +27,9 @@
 # command (`host.*`): the same launch script run on the host, writing only
 # under $XDG_STATE_HOME/agent-harness/<harness>. See README.md.
 #
-# Requires a running OpenShell gateway with the matching compute driver
-# (`openshell status`). Bind-mounting $PWD also needs the gateway opt-in
-# described in README.md.
+# Needs an OpenShell gateway with the matching compute driver
+# (`openshell status`): openshell-gateway.nix runs one by default, with the
+# bind-mount opt-in $PWD needs. See README.md.
 {
   config,
   inputs,
@@ -219,11 +219,18 @@ in {
       # Store paths are referenced from `config`, so they land in the image
       # closure without symlinking anything over the base image's /bin.
       # Only cacert goes in `contents`, to supply /etc/ssl/certs (the slim
-      # base has none).
+      # base has none). OpenShell's supervisor sets up the sandbox network
+      # with `ip` and `nft`, which it looks up only at fixed paths
+      # (/usr/sbin, /sbin, ...); the slim base has neither.
       image = pkgs.dockerTools.streamLayeredImage {
         name = "agent-harness-${name}";
         fromImage = cfg.image.base;
         contents = [pkgs.cacert];
+        extraCommands = ''
+          mkdir -p usr/sbin
+          ln -s ${pkgs.iproute2}/bin/ip usr/sbin/ip
+          ln -s ${pkgs.nftables}/bin/nft usr/sbin/nft
+        '';
         config = {
           WorkingDir = "/sandbox";
           Env = [
@@ -487,8 +494,8 @@ in {
           default = true;
           description = ''
             Bind-mount the directory the command runs from into the sandbox,
-            read-write. Needs `allow_driver_config`, `enable_bind_mounts` and
-            resource admission disabled on the gateway's driver.
+            read-write. Needs `enable_bind_mounts = true` in the gateway's
+            driver table (set by `openshell.gateway`).
           '';
         };
         target = lib.mkOption {
