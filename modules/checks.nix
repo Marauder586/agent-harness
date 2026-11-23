@@ -15,6 +15,9 @@
 #     service and its gateway.toml are checked, and the gateway is started
 #     on that config (with no container engine) to prove it parses.
 #   - openshell-gateway: the gateway builds, at the CLI's version.
+#   - devshell: runs a real sandboxed wrapper against fake openshell,
+#     podman, direnv and nix, and checks dev shell selection, the leading
+#     flag parsing, the env filter and the mounts it asks for.
 {
   inputs,
   config,
@@ -42,6 +45,186 @@ in {
             ${lib.getExe cli} --version | grep -F ${cli.version}
             touch $out
           '';
+
+      devshell = let
+        hm = inputs.home-manager.lib.homeManagerConfiguration {
+          inherit pkgs;
+          modules = [
+            hmModule
+            {
+              home.username = "check";
+              home.homeDirectory = "/home/check";
+              home.stateVersion = "26.05";
+              programs.agent-harness = {
+                openshell.engine = "podman";
+                openshell.gateway.enable = false;
+                openshell.package = fakeOpenshell;
+                harnesses.pi.enable = true;
+              };
+            }
+          ];
+        };
+        wrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-pi") (throw "no agent-pi") hm.config.home.packages);
+        # Records what the wrapper asked for: the arguments, the mounts, and
+        # a copy of the dev shell env file (deleted when the wrapper exits).
+        fakeOpenshell = pkgs.writeShellScriptBin "openshell" ''
+          printf '%s\n' "$@" > "$CASE/args"
+          prev=""
+          for a in "$@"; do
+            [ "$prev" != --driver-config-json ] || printf '%s' "$a" > "$CASE/mounts.json"
+            prev=$a
+          done
+          src=$(${lib.getExe pkgs.jq} -r '.podman.mounts[] | select(.target == "/sandbox/.devshell") | .source' "$CASE/mounts.json")
+          if [ -n "$src" ]; then
+            cp "$src/env" "$CASE/env"
+            stat -c %a "$src" > "$CASE/mode"
+          fi
+        '';
+        fakePodman = pkgs.writeShellScriptBin "podman" "exit 0";
+        fakeDirenv = pkgs.writeShellScriptBin "direnv" ''
+          case $1 in
+            status)
+              if [ -n "''${FAKE_RC-}" ]; then
+                printf '{"state":{"foundRC":{"allowed":%s,"path":"%s/.envrc"},"loadedRC":null}}' "$FAKE_RC" "$PWD"
+              else
+                echo '{"state":{"foundRC":null,"loadedRC":null}}'
+              fi
+              ;;
+            exec)
+              dir=$2
+              shift 2
+              if [ "$dir" != / ]; then
+                [ -z "''${FAKE_FAIL-}" ] || { echo "direnv: error exit status 1" >&2; exit 1; }
+                export FOO=bar HOME=/elsewhere TMPDIR=/tmp/x DIRENV_DIR=-$dir __fake=1 TERM_PROGRAM=x XDG_DATA_DIRS=/x
+                export SECRET="it's \"quoted\" \$(touch pwned)
+          second line"
+                export PROJECT_DATA=$dir/data
+                export PATH=/nix/store/fake-hello/bin:$dir/bin:/home/check/.cargo/bin:$PATH
+              fi
+              exec "$@"
+              ;;
+          esac
+        '';
+        devJson = pkgs.writeText "dev.json" (builtins.toJSON {
+          variables = {
+            PATH = {
+              type = "exported";
+              value = "/nix/store/fake-cowsay/bin:/path-not-set";
+            };
+            GREETING = {
+              type = "exported";
+              value = "moo";
+            };
+            NIX_BUILD_TOP = {
+              type = "exported";
+              value = "/build";
+            };
+            SSL_CERT_FILE = {
+              type = "exported";
+              value = "/no-cert-file.crt";
+            };
+            BASH = {
+              type = "var";
+              value = "/bin/bash";
+            };
+          };
+        });
+        fakeNix = pkgs.writeShellScriptBin "nix" ''
+          case $1 in
+            print-dev-env)
+              [ -z "''${FAKE_FAIL-}" ] || exit 1
+              echo "$3" > "$CASE/installable"
+              cat ${devJson}
+              ;;
+            eval)
+              [ -n "''${FAKE_FLAKE-}" ] || { echo "error: flake does not provide attribute 'devShells'" >&2; exit 1; }
+              echo true
+              ;;
+          esac
+        '';
+      in
+        pkgs.runCommand "check-devshell" {nativeBuildInputs = [fakePodman fakeDirenv fakeNix pkgs.jq];} ''
+          fail() { echo "devshell check, case $c: $*"; exit 1; }
+          run() {
+            c=$1
+            shift
+            export CASE=$TMPDIR/case-$c
+            mkdir -p "$CASE"
+            ${wrapper} "$@" 2> "$CASE/err" || { cat "$CASE/err"; fail "wrapper failed"; }
+            cat "$CASE/err"
+          }
+          harnessArgs() { sed '1,/^agent-launch$/d' "$CASE/args"; }
+          storeMounted() { jq -e '.podman.mounts | any(.target == "/nix/store" and .read_only)' "$CASE/mounts.json" >/dev/null; }
+          # Loads the env file the way agent-launch does, into a sandbox-like env.
+          bash=$(command -v bash)
+          inSandbox() {
+            env -i PATH=/base HOME=/sandbox TMPDIR=/tmp "$@" "$bash" -c \
+              '. "$1"; exec ${pkgs.coreutils}/bin/env' _ "$CASE/env"
+          }
+          has() { inSandbox | grep -qxF -- "$1" || fail "env lacks $1"; }
+          hasNot() { ! inSandbox | grep -q -- "^$1=" || fail "env has $1"; }
+
+          mkdir proj && cd proj
+
+          # Allowed .envrc. Flags are only taken while leading.
+          FAKE_RC=0 EDITOR=vim run envrc --print -- --no-devshell
+          [ "$(harnessArgs)" = "$(printf '%s\n' --print -- --no-devshell)" ] || fail "args: $(harnessArgs)"
+          storeMounted || fail "no /nix/store mount"
+          [ "$(cat "$CASE/mode")" = 700 ] || fail "env dir mode $(cat "$CASE/mode")"
+          grep -q 'left out: /home/check/.cargo/bin' "$CASE/err" || fail "dropped PATH entry not reported"
+          has FOO=bar
+          has HOME=/sandbox
+          has TMPDIR=/tmp
+          has PROJECT_DATA=/sandbox/work/data
+          has PATH=/nix/store/fake-hello/bin:/sandbox/work/bin:/base
+          for v in DIRENV_DIR __fake TERM_PROGRAM XDG_DATA_DIRS EDITOR; do hasNot $v; done
+          [ "$(env -i "$bash" -c '. "$1"; printf %s "$SECRET"' _ "$CASE/env")" = "$(printf '%s\n%s' "it's \"quoted\" \$(touch pwned)" "second line")" ] \
+            || fail "SECRET mangled"
+          [ ! -e pwned ] || fail "env file ran a command substitution"
+          inSandbox FOO=mine | grep -qx FOO=mine || fail "dev shell overrode a sandbox variable"
+          grep -q 'agent-launch' "$CASE/args"
+
+          # Not allowed, failing, disabled: no dev shell, no store mount.
+          FAKE_RC=1 run blocked
+          grep -q 'not allowed (direnv allow); starting without dev shell' "$CASE/err" || fail "no notice"
+          ! storeMounted || fail "store mounted"
+          FAKE_RC=0 FAKE_FAIL=1 run broken
+          grep -q 'direnv failed' "$CASE/err" || fail "no warning"
+          ! storeMounted || fail "store mounted"
+          FAKE_RC=0 run off --no-devshell --version
+          ! storeMounted || fail "store mounted"
+          [ "$(harnessArgs)" = --version ] || fail "args: $(harnessArgs)"
+          FAKE_RC=0 AGENT_DEVSHELL=none run off-env
+          ! storeMounted || fail "store mounted"
+
+          # Explicit installables, in all three spellings.
+          FAKE_RC=1 run flag --devshell .#cow x
+          [ "$(cat "$CASE/installable")" = .#cow ] && [ "$(harnessArgs)" = x ] || fail "installable/args"
+          storeMounted || fail "no /nix/store mount"
+          has GREETING=moo
+          has PATH=/nix/store/fake-cowsay/bin:/base
+          hasNot NIX_BUILD_TOP
+          hasNot SSL_CERT_FILE
+          hasNot BASH
+          run flag-eq --devshell=.#cow
+          [ "$(cat "$CASE/installable")" = .#cow ] || fail installable
+          AGENT_DEVSHELL=.#cow run flag-env
+          [ "$(cat "$CASE/installable")" = .#cow ] || fail installable
+          if FAKE_FAIL=1 CASE=$TMPDIR ${wrapper} --devshell .#x 2>/dev/null; then fail "explicit failure ignored"; fi
+          if ${wrapper} --devshell 2>/dev/null; then fail "--devshell without a value accepted"; fi
+
+          # Flake auto-detection, only with a default devShell.
+          run none
+          ! storeMounted || fail "store mounted"
+          touch flake.nix
+          run flake-none
+          ! storeMounted || fail "store mounted"
+          ! grep -qi 'dev shell\|flake' "$CASE/err" || fail "noise without a devShell"
+          FAKE_FLAKE=1 run flake
+          [ "$(cat "$CASE/installable")" = "$PWD#devShells.${pkgs.stdenv.hostPlatform.system}.default" ] || fail installable
+          storeMounted || fail "no /nix/store mount"
+          touch $out
+        '';
 
       skill-names = pkgs.runCommand "check-skill-names" {} ''
         ${lib.concatMapStrings (n: ''

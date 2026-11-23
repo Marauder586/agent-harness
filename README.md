@@ -29,7 +29,7 @@ On home-manager the flake runs the OpenShell gateway for you (`openshell.gateway
 
 After the first switch, `openshell status` must show the gateway. If it doesn't, see `journalctl --user -u openshell-gateway`.
 
-**Your own gateway instead** (non-NixOS, a remote gateway, OpenShell's installer): set `openshell.gateway.enable = false`, register it with `openshell gateway add`, and check `openshell status`. Its driver must allow the bind mount of the current directory (read-write at `/sandbox/work`):
+**Your own gateway instead** (non-NixOS, a remote gateway, OpenShell's installer): set `openshell.gateway.enable = false`, register it with `openshell gateway add`, and check `openshell status`. Its driver must allow bind mounts: the current directory (read-write at `/sandbox/work`) and, for [dev shells](#dev-shells), the host's `/nix/store` and the captured environment (read-only):
 
 ```toml
 [openshell.drivers.podman]   # or .docker
@@ -183,7 +183,7 @@ programs.agent-harness.harnesses.claude-code = {
 | `extraArgs` | `[]` | Arguments always passed to the harness. |
 | `host.enable` / `host.command` / `host.extensions` / `host.environment` | off / harness name / `[]` / `{}` | The [unsandboxed host command](#unsandboxed-host-command). `host.command` must differ from `command`. |
 
-Shared options: `secretEnvFiles` (variable name to host file; see [API keys](#llm-providers)), `openshell.engine` (`"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target`, and `image.base`.
+Shared options: `secretEnvFiles` (variable name to host file; see [API keys](#llm-providers)), `openshell.engine` (`"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target`, `devshell.auto` (see [Dev shells](#dev-shells)), and `image.base`.
 
 ### Gateway
 
@@ -196,7 +196,7 @@ Shared options: `secretEnvFiles` (variable name to host file; see [API keys](#ll
 | `port` | `17670` | Loopback port of the mTLS API. |
 | `settings` | see below | Written to `~/.config/openshell/gateway.toml`. |
 
-`settings` defaults to `bind_address = "127.0.0.1:<port>"`, `compute_drivers = [<engine>]`, `[openshell.drivers.<engine>] enable_bind_mounts = <workspace.mount>` and, for podman, `userns = "keep-id"`; anything you set is merged over that. Extra `OPENSHELL_*` variables and secrets (such as `OPENSHELL_DB_URL`) go in `~/.config/openshell/gateway.env`.
+`settings` defaults to `bind_address = "127.0.0.1:<port>"`, `compute_drivers = [<engine>]`, `[openshell.drivers.<engine>] enable_bind_mounts = true` (the workspace and dev shell mounts) and, for podman, `userns = "keep-id"`; anything you set is merged over that. Extra `OPENSHELL_*` variables and secrets (such as `OPENSHELL_DB_URL`) go in `~/.config/openshell/gateway.env`.
 
 On each start the service generates the local PKI if missing (`openshell-gateway generate-certs`: server certificate and CA under `~/.local/state/openshell/tls`, client bundle under `~/.config/openshell/gateways/openshell/mtls`), then runs `openshell gateway add https://127.0.0.1:<port> --local --name openshell` unless a gateway named `openshell` is already registered. The API is loopback-only and needs the client certificate, which only your user can read, so other local users cannot drive it. For sandbox callbacks the rootless podman driver opens a second TLS listener on the same port of the host's default-route address, limited to the sandbox gRPC calls and authenticated with gateway-minted sandbox tokens; keep that port closed in the host firewall (the NixOS default).
 
@@ -235,6 +235,53 @@ programs.agent-harness.harnesses.pi = {
 | `secretEnvFiles` (API keys) | passed with `--env` | exported into the process; never on a command line |
 
 `host.environment` overrides `environment` for the host; Hindsight uses it to point the host command at `http://127.0.0.1:9077`. Harness tools go after your PATH; only a directory holding the harness binary itself goes first, so a child started by name (e.g. pi-subagents' `pi` fallback) gets the real harness, not a same-named sandboxed command. Claude Code has no host mode, because its launch writes skills into `~/.claude`.
+
+### Dev shells
+
+Projects usually define their toolchain in a dev shell: a direnv `.envrc` (`use flake`, `use nix`, nix-direnv) or a flake's `devShells`. None of those tools exist in the sandbox, so the sandboxed command evaluates the dev shell **on the host** at launch and carries the result in:
+
+1. The environment is captured on the host and filtered (see below).
+2. It is written to a private temp directory (mode 0700, removed when the command exits), mounted read-only at `/sandbox/.devshell`. It never goes on a command line.
+3. The host's `/nix/store` is bind-mounted read-only over the image's, so every store path the dev shell names exists in the sandbox. The image's own paths come from the host store too, and the installed command keeps them alive (GC-rooted through your profile).
+4. `agent-launch` loads the file before the harness starts.
+
+Nothing changes for a project without a dev shell: no store mount, no env file. The command prints one line saying where the dev shell came from.
+
+**Which dev shell**, first match wins:
+
+| Source | What happens |
+|---|---|
+| `--devshell <installable>` or `--devshell=<installable>` | `nix print-dev-env --json <installable>`, e.g. `--devshell ~/src/foo#rust`. A failure aborts the launch. |
+| `--no-devshell` | No dev shell. |
+| `AGENT_DEVSHELL=<installable>` / `AGENT_DEVSHELL=none` | The same, from the environment. |
+| `.envrc` that direnv applies to `$PWD` (parent directories count), with `direnv` on PATH | Loaded with `direnv exec`. Only if you have run `direnv allow`; otherwise the command prints `.envrc not allowed (direnv allow); starting without dev shell` and goes on without one (it does not fall back to the flake). |
+| `./flake.nix` with `devShells.<system>.default` | `nix print-dev-env --json`. A flake without one is skipped silently. |
+
+Automatic detection (the last two rows) is on by default; turn it off with `programs.agent-harness.devshell.auto = false`. The flags are recognised only as the **leading** arguments and are removed before the rest go to the harness, so `pi --no-devshell -c` works, and `pi -c --no-devshell` passes `--no-devshell` to Pi.
+
+If direnv or `nix print-dev-env` fails during automatic detection, its error is shown and the agent starts without a dev shell: a broken `.envrc` should not lock you out of the agent, and the warning makes the missing tools obvious.
+
+The `.envrc` is loaded with `direnv exec "$PWD" env` and compared with `direnv exec / env` (your environment with any loaded direnv state undone). Only what the `.envrc` adds or changes is passed in. This works the same whether or not your shell already has the project's direnv environment loaded, and the `.envrc` sees your own PATH, not the wrapper's.
+
+**What is passed in:**
+
+- Dropped: host-session and build-sandbox variables (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD`, `OLDPWD`, `SHLVL`, `TERM*`, `COLORTERM`, `DISPLAY`, `WAYLAND_*`, `DBUS_*`, `XDG_*`, `SSH_*`, `GPG_*`, `TZ`), temp dirs (`TMP`, `TMPDIR`, `TEMP`, `TEMPDIR`, `NIX_BUILD_TOP`), `DIRENV_*`, `__*`, `OPENSHELL_*`, `NIX_ENFORCE_PURITY`, `NIX_LOG_FD`, and stdenv's `/no-cert-file.crt` placeholder. With `print-dev-env`, only exported variables.
+- Paths under the project directory are rewritten to `/sandbox/work`.
+- `PATH`: the dev shell's new entries go in front of the sandbox PATH. Only `/nix/store` entries and entries inside the project are kept; others (e.g. `~/.cargo/bin`) don't exist in the sandbox and are listed in a notice.
+- **Precedence:** a dev shell variable is set only if the sandbox doesn't already have it, so the image, OpenShell itself, `envFrom` and `secretEnvFiles` win. The harness's `environment` is applied afterwards and wins too.
+
+**Tradeoffs:**
+
+- The agent can read the whole host Nix store (read-only). It is world-readable on the host anyway, but don't keep secrets in it.
+- Everything the `.envrc` exports, including secrets from dotenv files, becomes visible to the agent.
+- The `.envrc` runs on the host with your privileges, as it would in your shell, and only once you have allowed it with direnv. A flake dev shell is evaluated and built on the host.
+
+**Limits:**
+
+- There is no Nix daemon in the sandbox: the agent can't `nix build`, `nix develop` or `nix shell`. Add the tools to the dev shell instead.
+- `print-dev-env` (the flake and `--devshell` paths) does not run the dev shell's `shellHook`; direnv's `use flake` does.
+- Tools from outside the Nix store (asdf, pyenv, rustup, Homebrew, `/run/current-system`, `/nix/var/nix/profiles`) don't exist in the sandbox; neither do variables pointing at such paths.
+- Automatic flake detection evaluates the flake on every launch (cached by Nix after the first time); use `--no-devshell` to skip it.
 
 ### LLM providers
 

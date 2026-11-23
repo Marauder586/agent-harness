@@ -21,7 +21,11 @@
 #      (lib/policy-gen.py),
 #   3. runs `openshell sandbox create --from <image> --policy <policy>
 #      --no-keep -- agent-launch "$@"`, with $PWD bind-mounted at
-#      /sandbox/work.
+#      /sandbox/work,
+#   4. if the project has a dev shell (direnv .envrc, flake devShell, or
+#      `--devshell <installable>`), evaluates it on the host, mounts its
+#      environment (lib/devshell-env.py) and the host's /nix/store
+#      read-only, and `agent-launch` loads it before the harness starts.
 #
 # Harnesses with `supportsHost = true` (pi) can also get an unsandboxed
 # command (`host.*`): the same launch script run on the host, writing only
@@ -55,6 +59,11 @@ in {
 
     allowConf = pkgs.writeText "agent-harness-allow.conf" (hl.renderAllowConf cfg.network.allow);
     policyGen = ../../lib/policy-gen.py;
+    devshellEnv = ../../lib/devshell-env.py;
+    # Where the wrapper mounts the captured dev shell environment (a
+    # directory holding `env`), read-only. Under /sandbox, which the
+    # policy's workdir rule already makes readable.
+    devshellDir = "/sandbox/.devshell";
 
     # Tools every sandbox gets, whatever the harness: a shell and coreutils
     # for the agent's bash tool, git, and the search tools Pi otherwise
@@ -159,6 +168,10 @@ in {
         set -eu
         export HOME=/sandbox
         export AGENT_HARNESS_STATE="$HOME/.${name}"
+        # The host dev shell, if the wrapper captured one: it only fills
+        # variables the sandbox does not already have, and prepends its PATH.
+        # `environment` below still wins.
+        if [ -f ${devshellDir}/env ]; then . ${devshellDir}/env; fi
         ${exports hcfg.environment}
         cd ${cfg.workspace.target} 2>/dev/null || cd "$HOME"
         ${launchScript extensions mcpConfig}
@@ -248,10 +261,37 @@ in {
       # gateway's image storage, socket, and containers config.
       engine = cfg.openshell.engine;
 
+      wrapperInputs = [cfg.openshell.package pkgs.jq pkgs.python3 pkgs.coreutils];
       wrapper = pkgs.writeShellApplication {
         name = hcfg.command;
-        runtimeInputs = [cfg.openshell.package pkgs.jq pkgs.python3 pkgs.coreutils];
+        runtimeInputs = wrapperInputs;
         text = ''
+          # The caller's PATH, without the runtimeInputs writeShellApplication
+          # put in front: direnv, nix and the .envrc see the user's own tools.
+          hostPath=''${PATH#"${lib.makeBinPath wrapperInputs}:"}
+
+          # Dev shell selection: leading --devshell/--no-devshell flags, then
+          # $AGENT_DEVSHELL, then devshell.auto. Everything after the first
+          # other argument goes to the harness untouched.
+          devshell=''${AGENT_DEVSHELL:-}
+          while [ $# -gt 0 ]; do
+            case $1 in
+              --devshell)
+                [ $# -ge 2 ] || { echo "agent-harness: --devshell needs an installable (e.g. .#default)" >&2; exit 2; }
+                devshell=$2
+                shift 2
+                ;;
+              --devshell=*) devshell=''${1#--devshell=}; shift ;;
+              --no-devshell) devshell=none; shift ;;
+              *) break ;;
+            esac
+          done
+          devshell=''${devshell:-${
+            if cfg.devshell.auto
+            then "auto"
+            else "none"
+          }}
+
           ${lib.optionalString cfg.openshell.gateway.enable ''
             # The gateway service starts with the user session, but a switch
             # may not have started it (or it stopped): start it on demand.
@@ -274,8 +314,11 @@ in {
             ${image} | ${engine} load >&2
           fi
 
-          policy=$(mktemp -t agent-harness-policy.XXXXXX)
-          trap 'rm -f "$policy"' EXIT
+          # Private (0700) scratch dir: the policy, and the dev shell env,
+          # which can hold secrets from the .envrc.
+          work=$(mktemp -d -t agent-harness.XXXXXX)
+          trap 'rm -rf "$work"' EXIT
+          policy=$work/policy.yaml
           python3 -I ${policyGen} \
             --uid "$(id -u)" --gid "$(id -g)" \
             --conf ${allowConf} \
@@ -303,11 +346,82 @@ in {
               args+=(--env "${s.n}=$(cat ${s.f})")
             '')
             secretFiles}
+          mounts='[]'
+          addMount() {
+            mounts=$(jq -c --arg src "$1" --arg dst "$2" --argjson ro "$3" \
+              '. + [{type: "bind", source: $src, target: $dst, read_only: $ro}]' <<<"$mounts")
+          }
           ${lib.optionalString cfg.workspace.mount ''
-            mount=$(jq -cn --arg src "$PWD" --arg dst ${lib.escapeShellArg cfg.workspace.target} \
-              '{${cfg.openshell.engine}: {mounts: [{type: "bind", source: $src, target: $dst, read_only: false}]}}')
-            args+=(--driver-config-json "$mount")
+            addMount "$PWD" ${lib.escapeShellArg cfg.workspace.target} false
           ''}
+
+          # Dev shell: evaluated on the host, its environment written to
+          # $work/devshell/env and mounted with the host's /nix/store.
+          mkdir -m 700 "$work/devshell"
+          envFile=$work/devshell/env
+          toEnvFile() {
+            python3 -I ${devshellEnv} "$@" ${lib.optionalString cfg.workspace.mount
+            "--workspace \"$PWD\" ${lib.escapeShellArg cfg.workspace.target}"} > "$envFile"
+          }
+          hostCmd() {
+            local bin
+            bin=$(PATH=$hostPath; command -v "$1") || return 1
+            shift
+            PATH=$hostPath "$bin" "$@"
+          }
+          fromInstallable() {
+            hostCmd nix print-dev-env --json "$1" > "$work/devshell.json" && toEnvFile --json "$work/devshell.json"
+          }
+          devshellFrom=""
+          case $devshell in
+            none) ;;
+            auto)
+              rc=""
+              if (PATH=$hostPath; command -v direnv >/dev/null); then
+                rc=$(hostCmd direnv status --json 2>/dev/null | jq -r '.state.foundRC // empty | "\(.allowed) \(.path)"') || rc=""
+              fi
+              if [ -n "$rc" ]; then
+                # 0 allowed, 1 not allowed, 2 denied. Never allow it ourselves.
+                if [ "''${rc%% *}" != 0 ]; then
+                  echo "agent-harness: ''${rc#* } not allowed (direnv allow); starting without dev shell" >&2
+                elif hostCmd direnv exec / ${pkgs.coreutils}/bin/env -0 > "$work/base.env" \
+                  && hostCmd direnv exec "$PWD" ${pkgs.coreutils}/bin/env -0 > "$work/shell.env"; then
+                  toEnvFile --direnv "$work/base.env" "$work/shell.env"
+                  devshellFrom="''${rc#* }"
+                else
+                  echo "agent-harness: direnv failed (see above); starting without dev shell" >&2
+                fi
+              elif [ -f flake.nix ] && (PATH=$hostPath; command -v nix >/dev/null); then
+                if has=$(hostCmd nix eval --json "$PWD#devShells.${system}" \
+                  --apply 'builtins.hasAttr "default"' 2>"$work/eval.err"); then
+                  if [ "$has" = true ]; then
+                    if fromInstallable "$PWD#devShells.${system}.default"; then
+                      devshellFrom="$PWD/flake.nix"
+                    else
+                      echo "agent-harness: nix print-dev-env failed (see above); starting without dev shell" >&2
+                    fi
+                  fi
+                elif [[ $(<"$work/eval.err") != *"does not provide attribute"* ]]; then
+                  cat "$work/eval.err" >&2
+                  echo "agent-harness: could not evaluate flake.nix; starting without dev shell" >&2
+                fi
+              fi
+              ;;
+            *)
+              # Asked for explicitly: a failure is fatal.
+              fromInstallable "$devshell" || { echo "agent-harness: dev shell $devshell failed" >&2; exit 1; }
+              devshellFrom=$devshell
+              ;;
+          esac
+          if [ -n "$devshellFrom" ] && [ -s "$envFile" ]; then
+            echo "agent-harness: dev shell from $devshellFrom (host /nix/store mounted read-only)" >&2
+            addMount "$work/devshell" ${devshellDir} true
+            addMount /nix/store /nix/store true
+          fi
+
+          if [ "$mounts" != '[]' ]; then
+            args+=(--driver-config-json "$(jq -cn --argjson m "$mounts" '{${cfg.openshell.engine}: {mounts: $m}}')")
+          fi
           openshell "''${args[@]}" -- agent-launch ${lib.escapeShellArgs hcfg.extraArgs} "$@"
         '';
       };
@@ -524,6 +638,19 @@ in {
           default = "/sandbox/work";
           description = "Where the project appears inside the sandbox (also the harness's cwd).";
         };
+      };
+
+      devshell.auto = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Load the project's dev shell into sandboxes: the directory's
+          direnv `.envrc` (only if `direnv allow`ed) or else its flake's
+          `devShells.<system>.default`, evaluated on the host. Its
+          environment is passed in, and the host's /nix/store is mounted
+          read-only. `--devshell <installable>`, `--no-devshell` and
+          `$AGENT_DEVSHELL` override it per run. See README.md, "Dev shells".
+        '';
       };
 
       openshell = {
