@@ -81,6 +81,18 @@ in {
         description = "Hindsight API image (the full variant: it bundles the local embedding and rerank models).";
       };
 
+      maxParallelRetains = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 4;
+        description = ''
+          How many retain (memory-save) queries the harness extension sends
+          to the server at once (HINDSIGHT_MAX_PARALLEL_RETAINS). Each one
+          runs fact extraction, so this caps the burst of LLM calls a
+          session end can trigger. Null uses the extension's default (10).
+        '';
+      };
+
       llm = {
         provider = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
@@ -141,6 +153,9 @@ in {
             HINDSIGHT_API_URL = "http://host.openshell.internal:${toString cfg.port}";
             # Pinned by Nix; the runtime must not re-stage itself from npm.
             HINDSIGHT_AUTO_UPDATE = "false";
+          }
+          // lib.optionalAttrs (cfg.maxParallelRetains != null) {
+            HINDSIGHT_MAX_PARALLEL_RETAINS = toString cfg.maxParallelRetains;
           };
         });
       }

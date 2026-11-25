@@ -285,7 +285,10 @@ in {
           };
         hm = hmEval {
           openshell.engine = "podman";
-          hindsight.enable = true;
+          hindsight = {
+            enable = true;
+            maxParallelRetains = 3;
+          };
           llm = {
             providers.local = {
               baseUrl = "http://10.0.0.9:8000/v1";
@@ -385,6 +388,15 @@ in {
           }).config.systemd.user.services
           ? openshell-gateway;
 
+        # hindsight.maxParallelRetains: set reaches the harness environment,
+        # null (the default) leaves the extension's own default in place.
+        retainsEnv = hmcfg: hmcfg.programs.agent-harness.harnesses.pi.environment;
+        retainsNull = (hmEval {
+          harnesses.pi.enable = true;
+          openshell.engine = "podman";
+          hindsight.enable = true;
+        }).config;
+
         hostHarnesses = lib.filterAttrs (_: def: def.supportsHost or false) harnesses;
         exeOf = cmd: lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == cmd) (throw "no ${cmd} in home.packages") hm.config.home.packages);
       in
@@ -393,6 +405,9 @@ in {
         assert lib.hasInfix "--server-san host.openshell.internal" (toString gwSvc.Service.ExecStartPre);
         assert toString gwSvc.Service.ExecStart == lib.getExe gwPkg;
         assert lib.elem "podman.socket" gwSvc.Unit.Wants;
+        assert retainsEnv hm.config ? HINDSIGHT_MAX_PARALLEL_RETAINS;
+        assert (retainsEnv hm.config).HINDSIGHT_MAX_PARALLEL_RETAINS == "3";
+        assert !(retainsEnv retainsNull ? HINDSIGHT_MAX_PARALLEL_RETAINS);
           pkgs.runCommand "check-home-manager" {} ''
             mkdir $out
             cp ${gwToml} $out/gateway.toml
