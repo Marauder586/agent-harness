@@ -1,8 +1,9 @@
 # Home-manager aspect: long-term agent memory with Hindsight
 # (https://hindsight.vectorize.io). Runs the server as a podman user
-# service, lets sandboxes reach it (network.hostPorts), and selects the
-# `hindsight` extension in every harness that has one. See README.md,
-# "Memory (Hindsight)".
+# service, lets sandboxes reach it (network.hostPorts), selects the
+# `hindsight` extension in every harness that has one, and optionally
+# runs the web dashboard (Control Plane) as a second container. See
+# README.md, "Memory (Hindsight)".
 {
   config,
   lib,
@@ -56,6 +57,34 @@ in {
         ${lib.concatStringsSep " \\\n        " (lib.mapAttrsToList (k: v: "--env ${lib.escapeShellArg "${k}=${v}"}") serverEnv)} \
         ${lib.escapeShellArg cfg.image}
     '';
+    dashEnv = {
+      # The API server, through its published host port: the container
+      # runs with host networking, so the dashboard's server-side proxy
+      # reaches it on loopback. The browser never talks to the API
+      # directly - the control plane proxies everything.
+      HINDSIGHT_CP_DATAPLANE_API_URL = "http://127.0.0.1:${toString cfg.port}";
+      HINDSIGHT_CP_PORT = toString cfg.dashboard.port;
+    };
+
+    # The access key, if any, is read into HINDSIGHT_CP_ACCESS_KEY by the
+    # start script, so it stays off the podman command line (the API key
+    # above gets the same treatment).
+    dashStart = pkgs.writeShellScript "agent-hindsight-dashboard-start" ''
+      set -eu
+      ${
+        if cfg.dashboard.accessKeyFile != null
+        then
+          ''
+          HINDSIGHT_CP_ACCESS_KEY=$(cat ${lib.escapeShellArg cfg.dashboard.accessKeyFile})
+          export HINDSIGHT_CP_ACCESS_KEY''
+        else ""
+      }
+      exec podman run --rm --replace --name agent-hindsight-dashboard \
+        --pull=missing \
+        --network=host \
+        ${lib.concatStringsSep " \\\n        " (lib.mapAttrsToList (k: v: "--env ${lib.escapeShellArg "${k}=${v}"}") dashEnv)} \
+        ${lib.escapeShellArg cfg.dashboard.image}
+    '';
   in {
     options.programs.agent-harness.hindsight = {
       enable = lib.mkEnableOption "Hindsight long-term memory, served from this machine";
@@ -91,6 +120,42 @@ in {
           runs fact extraction, so this caps the burst of LLM calls a
           session end can trigger. Null uses the extension's default (10).
         '';
+      };
+
+      dashboard = {
+        enable = lib.mkEnableOption ''
+          the Hindsight Control Plane, the web UI for browsing banks,
+          entities and recall results. It runs as a second container
+          (systemd user service agent-hindsight-dashboard) next to the API
+          server, on host port 9999 by default.
+        '';
+
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = 9999;
+          description = ''
+            Host port the dashboard listens on. The container uses host
+            networking, so it binds this port on every host address
+            directly; keep it closed in the host firewall.
+          '';
+        };
+
+        image = lib.mkOption {
+          type = lib.types.str;
+          default = "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:660f011039fb97aa224957e690ff805c0a4b64242656787d4532561679fb04fc";
+          description = "Hindsight Control Plane image (stateless: the dashboard only proxies the API).";
+        };
+
+        accessKeyFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/hindsight-dashboard-key";
+          description = ''
+            File holding the access key that protects the dashboard
+            (HINDSIGHT_CP_ACCESS_KEY), read when the service starts. Null
+            leaves the dashboard unauthenticated.
+          '';
+        };
       };
 
       llm = {
@@ -138,11 +203,17 @@ in {
             message = "programs.agent-harness.hindsight needs openshell.engine = \"podman\" (rootless podman with pasta), the only setup where sandboxes can reach host.openshell.internal.";
           }
         ];
-        warnings = lib.optional (!llmReady) ''
-          programs.agent-harness.hindsight: no LLM is set (programs.agent-harness.llm.default,
-          or hindsight.llm.provider), so the Hindsight server is not started and
-          agents run without memory.
-        '';
+        warnings =
+          lib.optional (!llmReady) ''
+            programs.agent-harness.hindsight: no LLM is set (programs.agent-harness.llm.default,
+            or hindsight.llm.provider), so the Hindsight server is not started and
+            agents run without memory.
+          ''
+          ++ lib.optional (cfg.dashboard.enable && !llmReady) ''
+            programs.agent-harness.hindsight.dashboard.enable is set, but no LLM is
+            configured, so the Hindsight server is not running and the dashboard
+            service is not created either.
+          '';
 
         programs.agent-harness.network.hostPorts = [cfg.port];
         programs.agent-harness.harnesses = lib.genAttrs cfg.harnesses (h: {
@@ -176,6 +247,25 @@ in {
             # First start pulls a multi-GB image.
             TimeoutStartSec = "infinity";
             TimeoutStopSec = 90;
+            Restart = "on-failure";
+            RestartSec = 10;
+          };
+          Install.WantedBy = ["default.target"];
+        };
+      })
+
+      (lib.mkIf (llmReady && cfg.dashboard.enable) {
+        systemd.user.services.agent-hindsight-dashboard = {
+          Unit = {
+            Description = "Hindsight Control Plane (web dashboard) for the local Hindsight server";
+            After = ["agent-hindsight.service" "network-online.target"];
+          };
+          Service = {
+            Environment = ["PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.profileDirectory}/bin:/usr/bin:/bin"];
+            ExecStart = "${dashStart}";
+            # First start pulls the image.
+            TimeoutStartSec = "infinity";
+            # Stateless: no volume, no graceful-stop dance.
             Restart = "on-failure";
             RestartSec = 10;
           };

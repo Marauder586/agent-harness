@@ -36,7 +36,7 @@ On home-manager the flake runs the OpenShell gateway for you (`openshell.gateway
   };
   ```
 
-  The gateway and Hindsight services find podman in `/run/wrappers/bin`, `/run/current-system/sw/bin`, the home-manager profile's `bin`, `/usr/bin` and `/bin`. Many distributions have no firewall by default: block port 9077 (Hindsight, unauthenticated, all addresses) and the gateway's 17670 on the LAN address.
+  The gateway and Hindsight services find podman in `/run/wrappers/bin`, `/run/current-system/sw/bin`, the home-manager profile's `bin`, `/usr/bin` and `/bin`. Many distributions have no firewall by default: block port 9077 (Hindsight, unauthenticated, all addresses), 9999 (Hindsight dashboard, when enabled) and the gateway's 17670 on the LAN address.
 - **Optional: lingering** (`users.users.<you>.linger = true` on NixOS, `loginctl enable-linger $USER` elsewhere) keeps the gateway running after you log out.
 
 The service starts with your session, and each sandboxed run starts it if it isn't running (waiting up to 30 s for the port; on failure the wrapper prints a `journalctl` hint and exits 1). Check it with `systemctl --user status openshell-gateway` and `openshell status` (read its output: the exit code is 0 even when the gateway is unreachable). Logs: `journalctl --user -u openshell-gateway`.
@@ -370,12 +370,13 @@ This gives agents long-term memory from [Hindsight](https://hindsight.vectorize.
 - **Models:** embeddings use `BAAI/bge-small-en-v1.5` (33M parameters) and reranking `hindsight-ai/hs-rerank-1` (114M). Both are bundled in the image and run on CPU, offline. Knowledge-bank embeddings reuse bge-small instead of the 744M EmbeddingGemma 2 default.
 - **LLM:** fact extraction and reflection need a chat model. It defaults to `llm.default`. Its provider type is `anthropic` for an `anthropic-messages` default, else `openai`. Override with `hindsight.llm.{provider,baseUrl,model,apiKeyFile}`. With no LLM, the server is not started (rebuilds show a warning), and agents run without memory. A keyless endpoint gets the dummy key `none`, which the server requires.
 - **Agents:** `hindsight.enable` adds the `hindsight` extension to `extensions` of each harness in `hindsight.harnesses` (default: every harness that has one, today `pi`), pointed at `http://host.openshell.internal:9077`. The extension is `extensions/pi/hindsight/`: `dist/pi.js` from the pinned `@vectorize-io/hindsight-coding-agents` npm tarball, plus the helper scripts it spawns. Recall is injected before each turn, and the transcript is saved after it. Agents get `HINDSIGHT_AUTO_UPDATE=false`. `hindsight.maxParallelRetains` caps how many retain (memory-save) queries the extension sends to the server at once (default: the extension's own 10); lower it to soften the burst of extraction LLM calls a session end can trigger. Extra server settings go in `hindsight.extraEnvironment` (`HINDSIGHT_API_*`; not for secrets, since they appear on the podman command line). Pinned: image `hindsight-api` 1.2.3, extension `hindsight-coding-agents` 0.8.8.
+- **Dashboard:** `hindsight.dashboard.enable = true` runs the Hindsight Control Plane, the web UI for browsing banks, entities and recall results (`hindsight.dashboard.port`, default 9999). It is a second, stateless container (systemd user service `agent-hindsight-dashboard`, pinned `hindsight-control-plane` image) that proxies the API server-side, so the browser only ever talks to the dashboard. It runs with host networking to reach the API's published port without podman network setup. The dashboard has no login; set `hindsight.dashboard.accessKeyFile` to a file holding an access key. It needs the server (and therefore an LLM) to be configured. Both Hindsight images are pinned by digest in their `image` options.
 - **Network:** the port is added to `network.hostPorts`, so this requires `openshell.engine = "podman"` with a rootless gateway.
 
 > [!WARNING]
-> The Hindsight server has no authentication and listens on every host address. Keep port 9077 closed in the host firewall. NixOS's firewall is on by default and does not open it.
+> The Hindsight server has no authentication and listens on every host address. Keep port 9077 closed in the host firewall (and 9999, the dashboard's port, when `hindsight.dashboard.enable` is on without `dashboard.accessKeyFile`). NixOS's firewall is on by default and does not open it.
 
-Check the server with `systemctl --user status agent-hindsight` and `curl http://127.0.0.1:9077/health`.
+Check the server with `systemctl --user status agent-hindsight` and `curl http://127.0.0.1:9077/health`; the dashboard (when enabled) with `systemctl --user status agent-hindsight-dashboard` and `http://127.0.0.1:9999`.
 
 ---
 
@@ -437,7 +438,7 @@ The flake uses the same dendritic flake-parts layout as `~/nix-config`. Every `.
 | `modules/skills-upstream.nix` | Registers every skill from pinned upstream repos, and declares the tools those skills need. |
 | `modules/home/agent-harness.nix` | The home-manager module. Generates options from the registries, and builds images and wrappers. |
 | `modules/home/llm.nix` | The LLM provider registry. |
-| `modules/home/hindsight.nix` | Hindsight memory: the local server and the harness extension. |
+| `modules/home/hindsight.nix` | Hindsight memory: the local server, the optional dashboard and the harness extension. |
 | `modules/home/openshell-gateway.nix` | The gateway systemd service, its config and PKI. |
 | `lib/policy-gen.py` | Turns the allowlist and host ports into an OpenShell policy at launch time. |
 | `lib/devshell-env.py` | Filters the captured dev shell environment into the env file. |
@@ -477,3 +478,4 @@ Five checks:
 | `openshell status` shows no gateway | `systemctl --user status openshell-gateway`. |
 | A request is blocked | The address and port are in `network.allow`. Hostnames must resolve inside the list. |
 | Pi runs without memory | `systemctl --user status agent-hindsight`, and that an LLM is set (rebuilds warn when it isn't). |
+| The dashboard is down or empty | `systemctl --user status agent-hindsight-dashboard`, and that the server is running. |

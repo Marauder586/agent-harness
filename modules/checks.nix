@@ -288,6 +288,7 @@ in {
           hindsight = {
             enable = true;
             maxParallelRetains = 3;
+            dashboard.enable = true;
           };
           llm = {
             providers.local = {
@@ -397,6 +398,12 @@ in {
           hindsight.enable = true;
         }).config;
 
+        # hindsight.dashboard: enabled creates the dashboard service bound to
+        # host networking and pointed at the API's published port; disabled
+        # (the default) creates no service.
+        dashSvc = hm.config.systemd.user.services.agent-hindsight-dashboard;
+        dashScript = toString dashSvc.Service.ExecStart;
+
         hostHarnesses = lib.filterAttrs (_: def: def.supportsHost or false) harnesses;
         exeOf = cmd: lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == cmd) (throw "no ${cmd} in home.packages") hm.config.home.packages);
       in
@@ -408,6 +415,12 @@ in {
         assert retainsEnv hm.config ? HINDSIGHT_MAX_PARALLEL_RETAINS;
         assert (retainsEnv hm.config).HINDSIGHT_MAX_PARALLEL_RETAINS == "3";
         assert !(retainsEnv retainsNull ? HINDSIGHT_MAX_PARALLEL_RETAINS);
+        assert hm.config.systemd.user.services ? agent-hindsight-dashboard;
+        assert lib.hasInfix "--network=host" (builtins.readFile dashScript);
+        assert lib.hasInfix "--env 'HINDSIGHT_CP_DATAPLANE_API_URL=http://127.0.0.1:9077'" (builtins.readFile dashScript);
+        assert lib.hasInfix "--env 'HINDSIGHT_CP_PORT=9999'" (builtins.readFile dashScript);
+        assert lib.hasInfix "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:" (builtins.readFile dashScript);
+        assert !(retainsNull.systemd.user.services ? agent-hindsight-dashboard);
           pkgs.runCommand "check-home-manager" {} ''
             mkdir $out
             cp ${gwToml} $out/gateway.toml
