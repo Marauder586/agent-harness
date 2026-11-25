@@ -142,7 +142,7 @@ in {
 
         image = lib.mkOption {
           type = lib.types.str;
-          default = "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:660f011039fb97aa224957e690ff805c0a4b64242656787d4532561679fb04fc";
+          default = "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:2d5ff37b44e03b9b660f4953b2a9780c216358b232281d92e65a080eb6202a6d";
           description = "Hindsight Control Plane image (stateless: the dashboard only proxies the API).";
         };
 
