@@ -298,6 +298,7 @@ in {
           hindsight = {
             enable = true;
             maxParallelRetains = 3;
+            mentalModelRefreshLLMMaxConcurrent = 4;
             dashboard.enable = true;
           };
           llm = {
@@ -409,6 +410,19 @@ in {
             hindsight.enable = true;
           }).config;
 
+        # hindsight.mentalModelRefreshLLMMaxConcurrent: set reaches the
+        # server container's environment, null (the default) leaves it out.
+        # Needs its own eval: the one above has no LLM, so no server runs.
+        mmNull =
+          (hmEval {
+            openshell.engine = "podman";
+            hindsight = {
+              enable = true;
+              llm.provider = "openai";
+            };
+          }).config;
+        serverScript = cfg: toString cfg.systemd.user.services.agent-hindsight.Service.ExecStart;
+
         # hindsight.dashboard: enabled creates the dashboard service bound to
         # host networking and pointed at the API's published port; disabled
         # (the default) creates no service.
@@ -428,6 +442,8 @@ in {
         assert retainsEnv hm.config ? HINDSIGHT_MAX_PARALLEL_RETAINS;
         assert (retainsEnv hm.config).HINDSIGHT_MAX_PARALLEL_RETAINS == "3";
         assert !(retainsEnv retainsNull ? HINDSIGHT_MAX_PARALLEL_RETAINS);
+        assert lib.hasInfix "--env 'HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT=4'" (builtins.readFile (serverScript hm.config));
+        assert !(lib.hasInfix "MENTAL_MODEL_REFRESH" (builtins.readFile (serverScript mmNull)));
         assert hm.config.systemd.user.services ? agent-hindsight-dashboard;
         assert lib.hasInfix "--network=host" (builtins.readFile dashScript);
         assert lib.hasInfix "--env 'HINDSIGHT_CP_DATAPLANE_API_URL=http://127.0.0.1:9077'" (builtins.readFile dashScript);

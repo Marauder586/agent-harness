@@ -101,6 +101,9 @@ in {
       }
       // lib.optionalAttrs (cfg.llm.model != null) {HINDSIGHT_API_LLM_MODEL = cfg.llm.model;}
       // lib.optionalAttrs (cfg.llm.baseUrl != null) {HINDSIGHT_API_LLM_BASE_URL = cfg.llm.baseUrl;}
+      // lib.optionalAttrs (cfg.mentalModelRefreshLLMMaxConcurrent != null) {
+        HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT = toString cfg.mentalModelRefreshLLMMaxConcurrent;
+      }
       // cfg.extraEnvironment;
 
     start = pkgs.writeShellScript "agent-hindsight-start" ''
@@ -182,6 +185,18 @@ in {
           to the server at once (HINDSIGHT_MAX_PARALLEL_RETAINS). Each one
           runs fact extraction, so this caps the burst of LLM calls a
           session end can trigger. Null uses the extension's default (10).
+        '';
+      };
+
+      mentalModelRefreshLLMMaxConcurrent = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 4;
+        description = ''
+          How many mental model refreshes can run at once
+          (HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT), a
+          server-side cap on the concurrent refresh LLM calls. Null uses
+          the server's own default.
         '';
       };
 
