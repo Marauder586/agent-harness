@@ -1,24 +1,88 @@
-# Home-manager aspect: long-term agent memory with Hindsight
-# (https://hindsight.vectorize.io). Runs the server as a podman user
-# service, lets sandboxes reach it (network.hostPorts), selects the
-# `hindsight` extension in every harness that has one, and optionally
-# runs the web dashboard (Control Plane) as a second container. See
-# README.md, "Memory (Hindsight)".
+# Long-term agent memory with Hindsight (https://hindsight.vectorize.io).
+# Home-manager aspect: runs the server as a podman user service, lets
+# sandboxes reach it (network.hostPorts), selects the `hindsight`
+# extension in every harness that has one, puts the `hindsight` CLI on the
+# host PATH, and optionally runs the web dashboard (Control Plane) as a
+# second container. Flake aspect: packages the CLI (per-system package
+# hindsight-cli). See README.md, "Memory (Hindsight)".
 {
   config,
   lib,
+  withSystem,
   ...
 }: let
   # Harnesses that ship a `hindsight` extension (extensions/<harness>/).
   supported =
     lib.attrNames (lib.filterAttrs (_: def: def.extensions ? hindsight) config.flake.agentHarnesses);
+
+  # The CLI and both server images move together: bump all three here.
+  version = "1.2.3";
+
+  # Release assets per platform (only linux: the binary is ELF, patched
+  # for nix's glibc/openssl with autoPatchelfHook). Only x86_64-linux is
+  # instantiated (modules/systems.nix); aarch64-linux is ready if
+  # systems.nix grows. The repo also ships darwin binaries, unsigned.
+  cliAssets = {
+    x86_64-linux = {
+      asset = "linux-amd64";
+      hash = "sha256-47fIP9Tqs6wGFBmc6IimNseDNIqloAGsyD42S3No+W4=";
+    };
+    aarch64-linux = {
+      asset = "linux-arm64";
+      hash = "sha256-LuIREACWSlnQ2DsGNyhlO3Efl0dy9beck0LItNS6ht0=";
+    };
+  };
 in {
+  # The Hindsight CLI (`hindsight`), the prebuilt release binary from the
+  # hindsight repo — the same artifact https://hindsight.vectorize.io/get-cli
+  # installs. Put on the host PATH by programs.agent-harness.hindsight.enable.
+  perSystem = {
+    pkgs,
+    system,
+    ...
+  }: {
+    packages.hindsight-cli = pkgs.stdenvNoCC.mkDerivation {
+      pname = "hindsight-cli";
+      inherit version;
+
+      src = pkgs.fetchurl {
+        url = "https://github.com/vectorize-io/hindsight/releases/download/v${version}/hindsight-${cliAssets.${system}.asset}";
+        hash = cliAssets.${system}.hash;
+      };
+
+      dontUnpack = true;
+      dontConfigure = true;
+
+      # The binary links glibc, libgcc and expects libssl.so.3 /
+      # libcrypto.so.3.
+      nativeBuildInputs = [pkgs.autoPatchelfHook];
+      buildInputs = [pkgs.libgcc pkgs.openssl];
+
+      installPhase = ''
+        runHook preInstall
+        install -Dm755 $src $out/bin/hindsight
+        runHook postInstall
+      '';
+
+      meta = {
+        description = "Command-line client for the Hindsight semantic memory API";
+        homepage = "https://hindsight.vectorize.io";
+        license = pkgs.lib.licenses.mit;
+        mainProgram = "hindsight";
+        sourceProvenance = with pkgs.lib.sourceTypes; [binaryNativeCode];
+        platforms = pkgs.lib.attrNames cliAssets;
+      };
+    };
+  };
   flake.modules.homeManager.agent-harness = {
     config,
     pkgs,
     lib,
     ...
   }: let
+    # This flake's build of the hindsight CLI (perSystem package in this
+    # file).
+    flakePackages = withSystem pkgs.stdenv.hostPlatform.system ({config, ...}: config.packages);
     cfg = config.programs.agent-harness.hindsight;
     llmReady = cfg.llm.provider != null;
 
@@ -73,8 +137,7 @@ in {
       set -eu
       ${
         if cfg.dashboard.accessKeyFile != null
-        then
-          ''
+        then ''
           HINDSIGHT_CP_ACCESS_KEY=$(cat ${lib.escapeShellArg cfg.dashboard.accessKeyFile})
           export HINDSIGHT_CP_ACCESS_KEY''
         else ""
@@ -106,7 +169,7 @@ in {
 
       image = lib.mkOption {
         type = lib.types.str;
-        default = "ghcr.io/vectorize-io/hindsight-api:1.2.3@sha256:2f318da3489f6493a5ec78f3d7019cd70835383fe4f4ffd1af9e080babd91d6c";
+        default = "ghcr.io/vectorize-io/hindsight-api:${version}@sha256:2f318da3489f6493a5ec78f3d7019cd70835383fe4f4ffd1af9e080babd91d6c";
         description = "Hindsight API image (the full variant: it bundles the local embedding and rerank models).";
       };
 
@@ -142,7 +205,7 @@ in {
 
         image = lib.mkOption {
           type = lib.types.str;
-          default = "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:2d5ff37b44e03b9b660f4953b2a9780c216358b232281d92e65a080eb6202a6d";
+          default = "ghcr.io/vectorize-io/hindsight-control-plane:${version}@sha256:2d5ff37b44e03b9b660f4953b2a9780c216358b232281d92e65a080eb6202a6d";
           description = "Hindsight Control Plane image (stateless: the dashboard only proxies the API).";
         };
 
@@ -216,18 +279,27 @@ in {
           '';
 
         programs.agent-harness.network.hostPorts = [cfg.port];
+
+        # The `hindsight` CLI in your own terminal, pointed at the local
+        # server (the CLI reads HINDSIGHT_API_URL with the highest
+        # priority, so a value of your own in home.sessionVariables or a
+        # shell export still wins, e.g. for a Hindsight Cloud bank).
+        home.packages = [flakePackages.hindsight-cli];
+        home.sessionVariables.HINDSIGHT_API_URL = "http://127.0.0.1:${toString cfg.port}";
+
         programs.agent-harness.harnesses = lib.genAttrs cfg.harnesses (h: {
           extensions = ["hindsight"];
           host.environment.HINDSIGHT_API_URL = "http://127.0.0.1:${toString cfg.port}";
-          environment = {
-            HINDSIGHT_SERVER_MODE = "self-hosted";
-            HINDSIGHT_API_URL = "http://host.openshell.internal:${toString cfg.port}";
-            # Pinned by Nix; the runtime must not re-stage itself from npm.
-            HINDSIGHT_AUTO_UPDATE = "false";
-          }
-          // lib.optionalAttrs (cfg.maxParallelRetains != null) {
-            HINDSIGHT_MAX_PARALLEL_RETAINS = toString cfg.maxParallelRetains;
-          };
+          environment =
+            {
+              HINDSIGHT_SERVER_MODE = "self-hosted";
+              HINDSIGHT_API_URL = "http://host.openshell.internal:${toString cfg.port}";
+              # Pinned by Nix; the runtime must not re-stage itself from npm.
+              HINDSIGHT_AUTO_UPDATE = "false";
+            }
+            // lib.optionalAttrs (cfg.maxParallelRetains != null) {
+              HINDSIGHT_MAX_PARALLEL_RETAINS = toString cfg.maxParallelRetains;
+            };
         });
       }
 

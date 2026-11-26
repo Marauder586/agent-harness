@@ -46,6 +46,16 @@ in {
             touch $out
           '';
 
+      # The hindsight CLI runs and reports the version the home-manager
+      # module pins (modules/home/hindsight.nix pins the server images;
+      # the two move together).
+      hindsight-cli =
+        pkgs.runCommand "check-hindsight-cli" {}
+        ''
+          ${lib.getExe self'.packages.hindsight-cli} --version | grep -Fx "hindsight ${self'.packages.hindsight-cli.version}"
+          touch $out
+        '';
+
       devshell = let
         hm = inputs.home-manager.lib.homeManagerConfiguration {
           inherit pkgs;
@@ -392,11 +402,12 @@ in {
         # hindsight.maxParallelRetains: set reaches the harness environment,
         # null (the default) leaves the extension's own default in place.
         retainsEnv = hmcfg: hmcfg.programs.agent-harness.harnesses.pi.environment;
-        retainsNull = (hmEval {
-          harnesses.pi.enable = true;
-          openshell.engine = "podman";
-          hindsight.enable = true;
-        }).config;
+        retainsNull =
+          (hmEval {
+            harnesses.pi.enable = true;
+            openshell.engine = "podman";
+            hindsight.enable = true;
+          }).config;
 
         # hindsight.dashboard: enabled creates the dashboard service bound to
         # host networking and pointed at the API's published port; disabled
@@ -406,6 +417,8 @@ in {
 
         hostHarnesses = lib.filterAttrs (_: def: def.supportsHost or false) harnesses;
         exeOf = cmd: lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == cmd) (throw "no ${cmd} in home.packages") hm.config.home.packages);
+        # hindsight off: no CLI in home.packages, no API URL session variable.
+        noHindsight = hmEval {harnesses.pi.enable = true;};
       in
         assert lib.all lib.id failed;
         assert !noGateway || throw "checks.home-manager: openshell.gateway.enable = false still defines the service";
@@ -421,6 +434,13 @@ in {
         assert lib.hasInfix "--env 'HINDSIGHT_CP_PORT=9999'" (builtins.readFile dashScript);
         assert lib.hasInfix "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:" (builtins.readFile dashScript);
         assert !(retainsNull.systemd.user.services ? agent-hindsight-dashboard);
+        # hindsight.enable puts the CLI on the host PATH, pointed at the
+        # local server; without hindsight there is neither.
+        assert lib.any (p: (p.meta.mainProgram or "") == "hindsight") hm.config.home.packages
+        || throw "checks.home-manager: hindsight CLI not in home.packages";
+        assert hm.config.home.sessionVariables.HINDSIGHT_API_URL == "http://127.0.0.1:9077";
+        assert !lib.any (p: (p.meta.mainProgram or "") == "hindsight") noHindsight.config.home.packages;
+        assert !(noHindsight.config.home.sessionVariables ? HINDSIGHT_API_URL);
           pkgs.runCommand "check-home-manager" {} ''
             mkdir $out
             cp ${gwToml} $out/gateway.toml
