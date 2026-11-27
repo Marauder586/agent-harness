@@ -218,7 +218,8 @@
         "pi-subagents": "pi-subagents",
         "rea-agents": "rea-agents",
         "rpiv-ask-user-question": "rpiv-ask-user-question",
-        "rpiv-config": "rpiv-config"
+        "rpiv-config": "rpiv-config",
+        "superpowers": "superpowers"
       }
     },
     "rpiv-ask-user-question": {
@@ -245,6 +246,23 @@
       "original": {
         "type": "tarball",
         "url": "https://registry.npmjs.org/@juicesharp/rpiv-config/-/rpiv-config-2.15.0.tgz"
+      }
+    },
+    "superpowers": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793744227,
+        "narHash": "sha256-rP5YsyGuPd9YSW/Fj3aukrq1bLuV+nwwQMK4JaZQgkI=",
+        "owner": "obra",
+        "repo": "superpowers",
+        "rev": "22f0b463e7a5e579904dd6211a520321035526f7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "obra",
+        "ref": "v7.0.2",
+        "repo": "superpowers",
+        "type": "github"
       }
     }
   },

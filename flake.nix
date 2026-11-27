@@ -38,6 +38,12 @@
       flake = false;
     };
 
+    # See extensions/pi/superpowers/.
+    superpowers = {
+      url = "github:obra/superpowers/v7.0.2";
+      flake = false;
+    };
+
     # See extensions/pi/mcp-adapter/.
     pi-mcp-adapter = {
       url = "https://registry.npmjs.org/pi-mcp-adapter/-/pi-mcp-adapter-7.0.1.tgz";
