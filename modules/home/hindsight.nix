@@ -104,6 +104,13 @@ in {
       // lib.optionalAttrs (cfg.mentalModelRefreshLLMMaxConcurrent != null) {
         HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT = toString cfg.mentalModelRefreshLLMMaxConcurrent;
       }
+      // lib.optionalAttrs (cfg.llmMaxConcurrent != null) {
+        HINDSIGHT_API_LLM_MAX_CONCURRENT = toString cfg.llmMaxConcurrent;
+      }
+      // lib.optionalAttrs (cfg.workerMaxSlots != null) {
+        HINDSIGHT_API_WORKER_MAX_SLOTS = toString cfg.workerMaxSlots;
+      }
+      // lib.optionalAttrs (cfg.workers != null) {HINDSIGHT_API_WORKERS = toString cfg.workers;}
       // cfg.extraEnvironment;
 
     start = pkgs.writeShellScript "agent-hindsight-start" ''
@@ -197,6 +204,38 @@ in {
           (HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT), a
           server-side cap on the concurrent refresh LLM calls. Null uses
           the server's own default.
+        '';
+      };
+
+      llmMaxConcurrent = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 8;
+        description = ''
+          How many LLM calls the server runs at once across all work
+          (HINDSIGHT_API_LLM_MAX_CONCURRENT). Null uses the server's own
+          default.
+        '';
+      };
+
+      workerMaxSlots = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 8;
+        description = ''
+          Slots per background worker (HINDSIGHT_API_WORKER_MAX_SLOTS):
+          how many tasks one worker can process at once. Null uses the
+          server's own default.
+        '';
+      };
+
+      workers = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        example = 4;
+        description = ''
+          How many background workers the server runs
+          (HINDSIGHT_API_WORKERS). Null uses the server's own default.
         '';
       };
 

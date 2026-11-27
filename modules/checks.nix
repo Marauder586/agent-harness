@@ -299,6 +299,9 @@ in {
             enable = true;
             maxParallelRetains = 3;
             mentalModelRefreshLLMMaxConcurrent = 4;
+            llmMaxConcurrent = 8;
+            workerMaxSlots = 8;
+            workers = 4;
             dashboard.enable = true;
           };
           llm = {
@@ -443,7 +446,12 @@ in {
         assert (retainsEnv hm.config).HINDSIGHT_MAX_PARALLEL_RETAINS == "3";
         assert !(retainsEnv retainsNull ? HINDSIGHT_MAX_PARALLEL_RETAINS);
         assert lib.hasInfix "--env 'HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT=4'" (builtins.readFile (serverScript hm.config));
+        assert lib.hasInfix "--env 'HINDSIGHT_API_LLM_MAX_CONCURRENT=8'" (builtins.readFile (serverScript hm.config));
+        assert lib.hasInfix "--env 'HINDSIGHT_API_WORKER_MAX_SLOTS=8'" (builtins.readFile (serverScript hm.config));
+        assert lib.hasInfix "--env 'HINDSIGHT_API_WORKERS=4'" (builtins.readFile (serverScript hm.config));
         assert !(lib.hasInfix "MENTAL_MODEL_REFRESH" (builtins.readFile (serverScript mmNull)));
+        assert !(lib.hasInfix "LLM_MAX_CONCURRENT" (builtins.readFile (serverScript mmNull)));
+        assert !(lib.hasInfix "WORKER" (builtins.readFile (serverScript mmNull)));
         assert hm.config.systemd.user.services ? agent-hindsight-dashboard;
         assert lib.hasInfix "--network=host" (builtins.readFile dashScript);
         assert lib.hasInfix "--env 'HINDSIGHT_CP_DATAPLANE_API_URL=http://127.0.0.1:9077'" (builtins.readFile dashScript);
