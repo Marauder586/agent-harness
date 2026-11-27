@@ -81,11 +81,16 @@ in {
       lower = "local?real=${overlayDir}/lower&state=${overlayDir}/lower-state&read-only=true";
       enc = lib.replaceStrings ["?" "&" "="] ["%3F" "%26" "%3D"];
     in "local-overlay://?lower-store=${enc lower}&upper-layer=${overlayDir}/upper&state=${overlayDir}/state&log=${overlayDir}/state/log&check-mount=false";
+    # Builds run without Nix's own sandbox and build users (OpenShell is the
+    # sandbox, and the agent is the only user). filter-syscalls: OpenShell
+    # already installs a seccomp filter and forbids loading another, so
+    # Nix's would fail every local build.
     overlayNixConfig = ''
       extra-experimental-features = nix-command flakes local-overlay-store read-only-local-store
       store = ${overlayStoreUrl}
       sandbox = false
       build-users-group =
+      filter-syscalls = false
     '';
 
     # Tools every sandbox gets, whatever the harness: a shell and coreutils
@@ -285,6 +290,15 @@ in {
         fromImage = cfg.image.base;
         contents = [pkgs.cacert];
         extraCommands = ''
+          # OpenShell's supervisor builds the sandbox CA bundle
+          # (/etc/openshell-tls/ca-bundle.pem, what SSL_CERT_FILE and
+          # friends point at) from the image's system bundle, found only
+          # at distro paths such as this one; cacert provides just
+          # ca-bundle.crt. Without it the bundle holds only OpenShell's own
+          # CA, and every `tls = "skip"` endpoint fails verification. A
+          # copy, not a link: it must not depend on the /nix/store mount.
+          mkdir -p etc/ssl
+          cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt etc/ssl/cert.pem
           mkdir -p usr/sbin
           ln -s ${pkgs.iproute2}/bin/ip usr/sbin/ip
           ln -s ${pkgs.nftables}/bin/nft usr/sbin/nft
@@ -357,6 +371,16 @@ in {
           if ! ${engine} image inspect "$ref" >/dev/null 2>&1; then
             echo "agent-harness: loading $ref into ${cfg.openshell.engine}" >&2
             ${image} | ${engine} load >&2
+            ${lib.optionalString (cfg.openshell.engine == "podman") ''
+            # The gateway runs the sandbox with the user mapped to their
+            # own uid (keep-id). Rootless podman makes a re-owned copy of
+            # an image's layers the first time it is used with a mapping,
+            # which for this image takes longer than the gateway's 30s
+            # create timeout. Make it now, with the same mapping.
+            echo "agent-harness: preparing $ref for the sandbox user (once per image)" >&2
+            warm=$(${engine} create --pull=never --userns="keep-id:uid=$(id -u),gid=$(id -g)" "$ref" true) \
+              && ${engine} rm "$warm" >/dev/null
+          ''}
           fi
 
           # Private (0700) scratch dir: the policy, and the dev shell env,

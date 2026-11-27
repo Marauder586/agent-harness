@@ -356,7 +356,7 @@ in {
         if python3 -I ${../lib/policy-gen.py} --uid 0 --gid 0 >/dev/null 2>&1; then
           echo "accepted root"; exit 1
         fi
-        gen --read-write '/home/u/my "proj"/' | jq -e '.filesystem_policy.read_write == ["/tmp", "/dev/null", "/dev/shm", "/home/u/my \"proj\""]' >/dev/null
+        gen --read-write '/home/u/my "proj"/' | jq -e '.filesystem_policy.read_write == ["/tmp", "/dev/null", "/dev/shm", "/dev/pts", "/home/u/my \"proj\""]' >/dev/null
         for bad in / relative; do
           if gen --read-write "$bad" >/dev/null 2>&1; then echo "accepted --read-write $bad"; exit 1; fi
         done

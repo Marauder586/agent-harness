@@ -69,11 +69,23 @@ def main():
             # writable overlay) is left out here.
             "read_only": [
                 p
-                for p in ["/nix/store", "/usr", "/lib", "/lib64", "/bin", "/etc", "/proc", "/dev/urandom"]
+                for p in [
+                    "/nix/store",
+                    "/usr",
+                    "/lib",
+                    "/lib64",
+                    "/bin",
+                    "/etc",
+                    "/proc",
+                    "/dev/urandom",
+                ]
                 if p not in {os.path.normpath(q) for q in a.read_write}
             ],
             # /dev/shm: Chromium (playwright MCP) needs shared memory.
-            "read_write": ["/tmp", "/dev/null", "/dev/shm"]
+            # /dev/pts: pseudoterminals, which Nix opens for every local
+            # build. /dev/ptmx links to pts/ptmx, and OpenShell refuses a
+            # symlink here, so only the directory is listed.
+            "read_write": ["/tmp", "/dev/null", "/dev/shm", "/dev/pts"]
             + [os.path.normpath(p) for p in a.read_write],
         },
         "landlock": {"compatibility": "hard_requirement"},
@@ -84,7 +96,10 @@ def main():
     if network:
         policy["network_policies"] = network
     else:
-        print("agent-harness: no network policies; sandbox has no network", file=sys.stderr)
+        print(
+            "agent-harness: no network policies; sandbox has no network",
+            file=sys.stderr,
+        )
     json.dump(policy, sys.stdout, indent=2)
     print()
 
