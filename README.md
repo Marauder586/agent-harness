@@ -1,6 +1,6 @@
 # agent-harness
 
-Run coding-agent harnesses (Claude Code and Pi today) inside [OpenShell](https://github.com/ai-openshell/openshell) sandboxes from a Nix config. Each sandbox can reach only an IP allowlist. Skills, MCP servers and LLM endpoints are declared once and wired into every harness you enable.
+Run coding-agent harnesses (Claude Code and Pi today) inside [OpenShell](https://github.com/ai-openshell/openshell) sandboxes from a Nix config. Each sandbox can reach only what its OpenShell network policies allow. Skills, MCP servers and LLM endpoints are declared once and wired into every harness you enable.
 
 What you get on a host:
 
@@ -127,7 +127,7 @@ homeConfigurations.me = home-manager.lib.homeManagerConfiguration {
 
 ### 4. Give the sandbox a model and a network
 
-A sandbox with an empty allowlist has no network, and a harness with no model can't do anything. The smallest working Pi setup points it at one OpenAI-compatible model endpoint:
+A sandbox with no network policies has no network, and a harness with no model can't do anything. The smallest working Pi setup points it at one OpenAI-compatible model endpoint:
 
 ```nix
 programs.agent-harness = {
@@ -146,7 +146,7 @@ programs.agent-harness = {
 };
 ```
 
-The provider's address and port are added to the allowlist automatically. See [LLM providers](#llm-providers).
+The provider gets a network policy for its address and port automatically. See [LLM providers](#llm-providers).
 
 ### 5. Rebuild and run
 
@@ -204,7 +204,7 @@ programs.agent-harness.harnesses.claude-code = {
 | `extraArgs` | `[]` | Arguments always passed to the harness. |
 | `host.enable` / `host.command` / `host.extensions` / `host.environment` | off / harness name / `[]` / `{}` | The [unsandboxed host command](#unsandboxed-host-command). `host.command` must differ from `command`. |
 
-Shared options: `secretEnvFiles` (variable name to host file, names validated; see [API keys](#llm-providers)), `openshell.engine` (default `"docker"`; `"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target` (default `null`: the project is mounted at `/sandbox/work/<dirname>`. Hindsight names a project's memory bank after that directory name, so each project gets its own bank. Hindsight's path-based settings (`mapPathToBank`, `optInPaths`) see the sandbox path, not the host path. Set a fixed path to mount every project there; that puts every project in one Hindsight bank), `devshell.auto` (see [Dev shells](#dev-shells)), `hostTools.enable` and `hostTools.variables` (see [Host tools](#host-tools)), `image.base` (default: a pinned amd64 `debian:bookworm-slim`) and the read-only `images` (each harness image's stream script).
+Shared options: `secretEnvFiles` (variable name to host file, names validated; see [API keys](#llm-providers)), `openshell.engine` (default `"docker"`; `"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target` (default `null`: the project is mounted at `/sandbox/work/<dirname>`. Hindsight names a project's memory bank after that directory name, so each project gets its own bank. Hindsight's path-based settings (`mapPathToBank`, `optInPaths`) see the sandbox path, not the host path. Set a fixed path to mount every project there; that puts every project in one Hindsight bank), `devshell.auto` (see [Dev shells](#dev-shells)), `nixStore.overlay.enable` and `nixStore.overlay.package` (see [Writable Nix store](#writable-nix-store)), `hostTools.enable` and `hostTools.variables` (see [Host tools](#host-tools)), `image.base` (default: a pinned amd64 `debian:bookworm-slim`) and the read-only `images` (each harness image's stream script).
 
 ### Gateway
 
@@ -248,7 +248,7 @@ programs.agent-harness.harnesses.pi = {
 |---|---|---|
 | Runs as | your UID in an OpenShell sandbox | you, directly on the host |
 | HOME | `/sandbox`, discarded on exit (unless `keep`), except the per-project `/sandbox/.persist` mount | your real HOME |
-| Network | the allowlist only | unrestricted |
+| Network | `network.policies` only | unrestricted |
 | State dir (`$AGENT_HARNESS_STATE`) | `/sandbox/.pi` | `$XDG_STATE_HOME/agent-harness/pi` (default `~/.local/state/…`) |
 | Pi config dir | `/sandbox/.pi/agent` | `$AGENT_HARNESS_STATE/agent`, rewritten each launch (stale `models.json`, `mcp.json` and `agents/` are removed); sessions persist. A hand-managed `~/.pi` is never touched. |
 | Skills, extensions, MCP servers, LLM registry, Hindsight | same | same, plus `host.extensions` |
@@ -303,7 +303,7 @@ The `.envrc` is loaded with `direnv exec "$PWD" env` and compared with `direnv e
 
 **Limits:**
 
-- There is no Nix daemon in the sandbox: the agent can't `nix build`, `nix develop` or `nix shell`. Add the tools to the dev shell instead.
+- There is no Nix daemon in the sandbox. With the [writable Nix store](#writable-nix-store) (the default with podman) the agent can still `nix build`, `nix develop` and `nix flake check` inside it; without it, add the tools to the dev shell instead.
 - `print-dev-env` (the flake and `--devshell` paths) does not run the dev shell's `shellHook`; direnv's `use flake` does.
 - Tools from outside the Nix store (asdf, pyenv, rustup, Homebrew) don't exist in the sandbox; neither do variables pointing at such paths. Dev shell entries in `/run/current-system` or `/nix/var/nix/profiles` are dropped too; [host tools](#host-tools) brings in your profiles.
 - Automatic flake detection evaluates the flake on every launch (cached by Nix after the first time); use `--no-devshell` to skip it.
@@ -328,9 +328,33 @@ Only the listed variables are read. The rest of your environment, tokens include
 **Tradeoffs and limits:**
 
 - The agent can read the whole host Nix store, as with dev shells. Don't keep secrets in it.
-- Host `nix` is on PATH, but there is no Nix daemon in the sandbox and the store is read-only, so `nix build`, `nix develop` and `nix shell` fail. Mounting the daemon socket is deliberately not offered: builds would run on the host, and fixed-output derivations get the host's network, outside the allowlist.
+- Mounting the Nix daemon socket is deliberately not offered: builds would run on the host, and fixed-output derivations get the host's network, outside the network policies. The [writable Nix store](#writable-nix-store) runs Nix inside the sandbox instead.
 - Programs that read host `/etc` (`/etc/nix/nix.conf`, `/etc/gitconfig`) see the image's Debian `/etc` instead.
 - The paths are taken at launch. A tool installed while the sandbox runs needs a new session.
+
+### Writable Nix store
+
+```nix
+programs.agent-harness.nixStore.overlay.enable = true;   # the default with openshell.engine = "podman"
+```
+
+Every sandbox gets a writable `/nix/store`, so agents can run `nix build`, `nix develop`, `nix shell` and `nix flake check` there, including on dev shells and flakes they just changed, without the Nix daemon:
+
+1. `/nix/store` in the sandbox is a [fuse-overlayfs](https://github.com/containers/fuse-overlayfs) mount. The host's store is the read-only lower layer and a per-project upper layer is on the host, under `$XDG_STATE_HOME/agent-harness/nix-overlay/<first 16 hex of sha256(project path)>/` (its `.path` file names the project). Every host store path is visible. New paths go to the upper layer and stay for the next session of that project, for every harness.
+2. The wrapper mounts it inside rootless podman's namespace (`podman unshare`), where the gateway's containers see it. The mount stays up between sessions and is shared by concurrent sessions of the same project. Kernel overlayfs can't be used here: an unprivileged mount can't turn on `redirect_dir`, and without it `rename()` of a new directory into the store fails with `EXDEV`, which Nix can't recover from.
+3. Inside, `agent-launch` sets `NIX_CONFIG` to Nix's experimental [local-overlay store](https://nix.dev/manual/nix/latest/store/types/experimental-local-overlay-store). The lower store and its database are mounted read-only at `/sandbox/.nix-store-overlay/lower` and `lower-state`; the upper layer and its own database are at `/sandbox/.nix-store-overlay/upper` and `state`. The image ships its own `nix` (`nixStore.overlay.package`, default `pkgs.nix`).
+4. Builds run as the agent's user with `sandbox = false`: OpenShell is the sandbox. Substitution, flake fetching and fixed-output downloads all run inside it, through OpenShell's proxy, under the [network policies](#network-policies). `NIX_SSL_CERT_FILE` is set to OpenShell's CA bundle so `nix` trusts its TLS inspection.
+
+Allow what Nix fetches in `network.policies`: `cache.nixos.org` for substitution, `channels.nixos.org` and `releases.nixos.org` for `nixpkgs#…`, `api.github.com`, `github.com` and `codeload.github.com` for `github:` inputs, and the source hosts of anything that must be built. Fixed-output downloads are run by `curl` or `git` from the store, not `nix`, so their `binaries` must include those. They may also use nixpkgs' own CA bundle instead of OpenShell's, so an endpoint with `protocol = "rest"` (TLS inspection) can fail for them; use an uninspected endpoint (no `protocol`) for build source hosts.
+
+**Tradeoffs and limits:**
+
+- The agent can read the whole host store, as with dev shells and host tools.
+- Garbage-collecting the host store can delete paths a project's upper layer depends on. Nix requires the lower store to only grow. If a project's store breaks, delete its `nix-overlay/<hash>` directory (unmount it first with `podman unshare umount <dir>/merged`, or let a reboot do it).
+- Paths built in the sandbox exist only in that project's upper layer, not in the host store. Your own shell and direnv build them again on the host.
+- Builds run on CPU and disk inside the sandbox, at fuse-overlayfs speed. The upper layer grows with what agents build; it is not garbage-collected.
+- The local-overlay store is an experimental Nix feature.
+- Needs `openshell.engine = "podman"` (rootless) and `/dev/fuse` on the host.
 
 ### LLM providers
 
@@ -361,26 +385,53 @@ programs.agent-harness.llm = {
 | Pi | A `models.json` provider per entry, and `default` as `defaultProvider` / `defaultModel`. |
 | Claude Code | Only when `default` is an `api = "anthropic-messages"` provider: `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_AUTH_TOKEN` when the provider has an `apiKeyFile`. Other APIs can't drive Claude Code. |
 | Hindsight | `default` becomes its extraction LLM. `hindsight.llm.*` overrides it. |
-| Network | An IPv4 `baseUrl` is added to `network.allow` on its port (80/443 if omitted). For a hostname or IPv6 address you must set the provider's `allow` (to the addresses it resolves to), or evaluation fails. Loopback and link-local addresses fail evaluation, since the sandbox can never reach them: for a model served on this machine, listen on a LAN address and use that. |
+| Network | The provider gets the network policy `llm-<name>`: one endpoint for the `baseUrl`'s host and port (80/443 if omitted), for every binary, uninspected. A literal IPv4 host also gets `allowed_ips` for exactly that address. Override it with the provider's `network`, an entry in OpenShell's schema, or set `network = null` when another policy covers the endpoint. Loopback, link-local and `localhost` fail evaluation, since the sandbox can never reach them: for a model served on this machine, listen on a LAN address and use that. |
 
-Provider fields: `baseUrl`, `api` (`openai-completions`, `openai-responses`, `anthropic-messages`), `apiKeyFile`, `models`, `compat` (Pi compatibility overrides), `displayName`, `allow`. Model fields: `id`, `name`, `reasoning`, `input`, `contextWindow`, `maxTokens`, `extra` (merged into the Pi model entry: `cost`, `samplingParams`, and so on).
+Provider fields: `baseUrl`, `api` (`openai-completions`, `openai-responses`, `anthropic-messages`), `apiKeyFile`, `models`, `compat` (Pi compatibility overrides), `displayName`, `network`. Model fields: `id`, `name`, `reasoning`, `input`, `contextWindow`, `maxTokens`, `extra` (merged into the Pi model entry: `cost`, `samplingParams`, and so on).
 
 **API keys:** `apiKeyFile` becomes a `secretEnvFiles` entry: it is read on the host at each launch and passed into the sandbox as `AGENT_LLM_<NAME>_API_KEY`. The agent can read it, and it appears in the host process list while the launcher runs. Keep the file out of the Nix store (`/run/secrets/…` from sops-nix or agenix, or a file in your home directory). For a key the agent must not see, attach an OpenShell provider (`harnesses.<h>.providers`) instead and leave `apiKeyFile` unset.
 
-### Network allowlist
+### Network policies
 
-A sandbox can reach only what the allowlist names: `programs.agent-harness.network.allow`, plus the entries LLM providers add. Everything else is denied. Entries overlapping loopback, link-local or the unspecified address (`127.0.0.0/8`, `169.254.0.0/16`, `0.0.0.0`, `::1`, `::`, `fe80::/10`) are rejected and the launch fails, so `0.0.0.0/0` can't be used for open network. The command refuses to run as root. The list is part of your Nix config and baked into the store, so neither the user nor the agent can widen it at run time.
+A sandbox can reach only what `programs.agent-harness.network.policies` allows, plus the entries LLM providers (`llm-<name>`) and Hindsight (`hindsight`) add. Everything else is denied. The option is OpenShell's own [`network_policies`](https://github.com/ai-openshell/openshell/blob/main/docs/reference/policy-schema.mdx) map, in OpenShell's schema, copied into every sandbox's policy unchanged. OpenShell validates it when the sandbox is created. The module checks only that each name is plain (letters, digits, `_`, `.`, `-`) and that each entry has `endpoints` and `binaries`, which OpenShell requires. The policies are part of your Nix config and baked into the store, so neither you nor the agent can widen them at run time.
 
 ```nix
-programs.agent-harness.network.allow = [
-  "10.0.0.5/32"                              # bare string: port 443 only
-  {cidr = "10.0.1.0/24"; ports = [443 22];}
-];
+programs.agent-harness.network.policies = {
+  # A named service: the requested name must match, OpenShell resolves it
+  # and checks the address. `protocol = "rest"` inspects each HTTPS request
+  # (method, path), with `access` or explicit `rules`.
+  gitlab = {
+    endpoints = [{ host = "gitlab.example.com"; port = 443; protocol = "rest"; access = "read-write"; }];
+    binaries = [{ path = "/**"; }];
+  };
+  # A name and an address: both must match.
+  inference = {
+    endpoints = [{ host = "llm.lan"; port = 8000; allowed_ips = [ "10.0.0.9/32" ]; }];
+    binaries = [{ path = "/**"; }];
+  };
+  # Addresses only (hostless): any name that resolves into the range passes.
+  # Plain TCP relay, e.g. for SSH.
+  lan-ssh = {
+    endpoints = [{ port = 22; tls = "skip"; allowed_ips = [ "10.0.1.0/24" ]; }];
+    binaries = [{ path = "/**"; }];
+  };
+};
 ```
 
-The generated policy has one hostless `allowed_ips` endpoint per port, with `tls: skip`, for every binary. It is a layer-4 allowlist: no TLS interception and no per-request rules. Hostnames still work, because OpenShell resolves them and checks the resolved address. Anything that resolves outside the list is denied. That includes most SaaS endpoints, whose IP addresses change.
+How OpenShell treats the three forms:
 
-**Services on the host:** `network.hostPorts = [9077]` lets the sandbox reach a service on the host machine as `host.openshell.internal:9077`. This works only with a rootless podman gateway: OpenShell lets this alias through only when it maps to pasta's link-local host address. A port cannot be in both `hostPorts` and `allow`. The service must listen on a non-loopback address, because pasta delivers these connections to the host's own interface address.
+| | `host` | `host` and `allowed_ips` | hostless `allowed_ips` |
+|---|---|---|---|
+| What must match | The requested name, exactly or by a first-label wildcard (`*.example.com`). | Name and resolved address. | Only the resolved address, whatever the name. |
+| Private ranges (10.x, 192.168.x) | An exact host may resolve to them; a wildcard may not. | Only the listed ones. | Only the listed ones. |
+| Request inspection (`protocol = "rest"` and the others), provider credentials | Yes | Yes | No |
+| `protocol = "tcp"` (transparent, non-HTTP) | Yes | Yes | No |
+
+In every form, loopback, link-local (including `169.254.169.254`) and `0.0.0.0` are always blocked. `binaries` limits which programs may use the entry (`/**` is any). Names are resolved by OpenShell's supervisor, not the agent, through the container's `/etc/hosts` and `/etc/resolv.conf`, which podman derives from the host's. The supervisor connects only to the addresses it checked.
+
+Prefer exact `host` entries, with `protocol = "rest"` and narrow `rules` where the agent shouldn't have full access: an allowed host is also a path for data to leave (pushing to any repository, posting a gist). Wildcards let the agent encode data in DNS lookups. Hostless `allowed_ips` matches any name that resolves into the range.
+
+`network.allow` and `network.hostPorts` were removed. Setting either fails with the equivalent `network.policies` entry. A service on the host is an entry with `endpoints = [{ host = "host.openshell.internal"; port = <port>; tls = "skip"; }]`. This works only with a rootless podman gateway: OpenShell lets the alias through only when it maps to pasta's link-local host address. The service must listen on a non-loopback address, because pasta delivers these connections to the host's own interface address.
 
 ### Memory (Hindsight)
 
@@ -397,7 +448,7 @@ This gives agents long-term memory from [Hindsight](https://hindsight.vectorize.
 - **Mental model refreshes:** the extension's pages (Hindsight mental models) refresh on a cron by default. `hindsight.mentalModels.trigger` picks `"cron"` (default), `"auto-refresh"` (after every consolidation, so whenever new memories are processed: most current, one LLM synthesis per page each time) or `"manual"`. `hindsight.mentalModels.cron` sets the schedule (default `"H * * * *"`, UTC). An `H` field gets a per-page value hashed from the bank and page name, so pages don't refresh all at once: `"H H * * *"` is daily. A scheduled tick is skipped when nothing new arrived. Every session re-syncs the extension's existing pages to these settings. They reach the extension as `HINDSIGHT_PAGE_TRIGGER_TYPE` and `HINDSIGHT_PAGE_TRIGGER_CRON`, which a `~/.hindsight/coding-agent.json` on the host would override for host commands. Server side, `hindsight.mentalModels.minRefreshIntervalSeconds` sets a floor between two refreshes of one model, whatever triggered them (`HINDSIGHT_API_MENTAL_MODEL_MIN_REFRESH_INTERVAL_SECONDS`, server default 0). `hindsight.mentalModels.refreshTickSeconds` sets how often the server looks for due cron refreshes (`HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS`, server default 300). Null leaves the server default.
 - **Dashboard:** `hindsight.dashboard.enable = true` runs the Hindsight Control Plane, the web UI for browsing banks, entities and recall results (`hindsight.dashboard.port`, default 9999). It is a second, stateless container (systemd user service `agent-hindsight-dashboard`, pinned `hindsight-control-plane` image) that proxies the API server-side, so the browser only ever talks to the dashboard. It runs with host networking to reach the API's published port without podman network setup. The dashboard has no login; set `hindsight.dashboard.accessKeyFile` to a file holding an access key. It needs the server (and therefore an LLM) to be configured. Both Hindsight images are pinned by digest in their `image` options.
 - **CLI:** `hindsight.enable` also puts the `hindsight` CLI in your own terminal: the prebuilt release binary, pinned to the same version as the server images. It is preset to the local server with `HINDSIGHT_API_URL=http://127.0.0.1:9077` (follows `hindsight.port`); that variable wins over everything, so set your own (or a `HINDSIGHT_PROFILE`) to reach another server or a Hindsight Cloud bank.
-- **Network:** the port is added to `network.hostPorts`, so this requires `openshell.engine = "podman"` with a rootless gateway.
+- **Network:** adds the network policy `hindsight`, an endpoint for `host.openshell.internal:<port>` with `tls: skip`, so this requires `openshell.engine = "podman"` with a rootless gateway.
 
 > [!WARNING]
 > The Hindsight server has no authentication and listens on every host address. Keep port 9077 closed in the host firewall (and 9999, the dashboard's port, when `hindsight.dashboard.enable` is on without `dashboard.accessKeyFile`). NixOS's firewall is on by default and does not open it.
@@ -424,8 +475,8 @@ The upstream skills are the skill content of the Claude Code plugins in nix-conf
 
 | Name | What it is |
 |---|---|
-| `playwright` | Browser automation with nixpkgs' `playwright-mcp` and its bundled headless Chromium. In the sandbox it runs with `--no-sandbox`, because OpenShell is the isolation boundary, and the browser reaches only the allowlist, plus servers inside the sandbox such as a dev server on localhost. Output goes to `/tmp/playwright-mcp` and is discarded with the sandbox; save under the project directory to keep it. The host command keeps Chromium's sandbox and writes output under its state dir. |
-| `rea` | [REA](https://github.com/morluto/rea) reverse engineering (roughly 260 tools), from the pinned npm `6.10.1` tarball instead of `npx`, which the allowlist would block. Native engines (Ghidra, Hopper, IDA) and `frida` are not included; add one with `extraPackages`. Static JavaScript and Electron analysis needs none. |
+| `playwright` | Browser automation with nixpkgs' `playwright-mcp` and its bundled headless Chromium. In the sandbox it runs with `--no-sandbox`, because OpenShell is the isolation boundary, and the browser reaches only what the network policies allow, plus servers inside the sandbox such as a dev server on localhost. Output goes to `/tmp/playwright-mcp` and is discarded with the sandbox; save under the project directory to keep it. The host command keeps Chromium's sandbox and writes output under its state dir. |
+| `rea` | [REA](https://github.com/morluto/rea) reverse engineering (roughly 260 tools), from the pinned npm `6.10.1` tarball instead of `npx`, which the network policies would block. Native engines (Ghidra, Hopper, IDA) and `frida` are not included; add one with `extraPackages`. Static JavaScript and Electron analysis needs none. |
 
 Claude Code gets the selected servers through `--mcp-config`. Pi gets them as `$AGENT_HARNESS_STATE/agent/mcp.json`.
 
@@ -444,11 +495,11 @@ Claude Code gets the selected servers through `--mcp-config`. Pi gets them as `$
 
 **`mcp-adapter`** reads the same `mcp.json`, so `mcpServers` works unchanged. Instead of codemode scripts, the model gets one `mcp` proxy tool for search and calls. Servers start on first use and stop after 10 idle minutes. It also adds MCP prompts, elicitation, sampling and Tasks. When it is selected, the harness adds `-builtin:mcp` to `settings.json`, so the built-in never runs alongside it. Pi's `codemode` may no longer be on automatically (unverified); add `"+codemode"` to `settings.defaultTools` to keep it. MCP servers that use OAuth can't keep tokens in an OS keychain inside the sandbox.
 
-**`subagents`** adds the `subagent`, `subagent_kill` and `subagent_resume` tools, the `/subagents` overlay (Alt+S), and an opt-in orchestrator mode (`PI_ORCHESTRATOR_MODE = "1"` in `environment`). The model can only launch named agents, read from `$PI_CODING_AGENT_DIR/agents/` and the project's `.pi/agents/`. The harness ships three background agents: `scout` (read-only search), `worker` (implementation) and `reviewer` (read-only review), from `extensions/pi/subagents/agents/`; they are rewritten into `$PI_CODING_AGENT_DIR/agents/` on every launch, so put your own agents in the project's `.pi/agents/`. A project agent with the same name replaces one. Each child is a headless `pi -p` process in the same sandbox, with the same settings, skills, extensions and allowlist; children run with `--no-approve` (as far as we know) and inherit every environment variable. Limits: agents with `mode: interactive` (upstream's default) need a terminal multiplexer around Pi, which the sandbox does not have, so set `mode: background` in project agents. `llm-as-a-verifier` agents fail, because they install a Python venv from PyPI on first use.
+**`subagents`** adds the `subagent`, `subagent_kill` and `subagent_resume` tools, the `/subagents` overlay (Alt+S), and an opt-in orchestrator mode (`PI_ORCHESTRATOR_MODE = "1"` in `environment`). The model can only launch named agents, read from `$PI_CODING_AGENT_DIR/agents/` and the project's `.pi/agents/`. The harness ships three background agents: `scout` (read-only search), `worker` (implementation) and `reviewer` (read-only review), from `extensions/pi/subagents/agents/`; they are rewritten into `$PI_CODING_AGENT_DIR/agents/` on every launch, so put your own agents in the project's `.pi/agents/`. A project agent with the same name replaces one. Each child is a headless `pi -p` process in the same sandbox, with the same settings, skills, extensions and network policies; children run with `--no-approve` (as far as we know) and inherit every environment variable. Limits: agents with `mode: interactive` (upstream's default) need a terminal multiplexer around Pi, which the sandbox does not have, so set `mode: background` in project agents. `llm-as-a-verifier` agents fail, because they install a Python venv from PyPI on first use.
 
 **`claude-bridge`** registers the `claude-bridge` provider, with every Claude model in Pi's Anthropic catalog (`claude-bridge/claude-opus-5-5`, and so on). It adds no tools or commands. Pi's tools are bridged into Claude Code, so tool calls still go through Pi. Selecting the extension puts this flake's `claude-code` package on PATH (its `passthru.packages`), and the bridge is patched to run that binary instead of the Agent SDK's per-platform native one (`provider.pathToClaudeCodeExecutable` in `$PI_CODING_AGENT_DIR/claude-bridge.json` overrides it). Claude Code is a separate process that Pi starts, so it sees the same allowlist and environment, and writes its session files under `/sandbox/.claude`.
 
-The bridge does not authenticate by itself, and nothing is configured for it by default. A fresh sandbox has no Claude Code login, so a turn fails with `Not logged in · Please run /login`. Claude Code uses `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` from Pi's environment (metered API billing), or a subscription login in `~/.claude`, which is deleted with the sandbox. It also needs to reach `api.anthropic.com`, a SaaS endpoint that an IP allowlist does not handle well (see [Network allowlist](#network-allowlist)). Any `llm` provider with `api = "anthropic-messages"` does not affect the bridge.
+The bridge does not authenticate by itself, and nothing is configured for it by default. A fresh sandbox has no Claude Code login, so a turn fails with `Not logged in · Please run /login`. Claude Code uses `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` from Pi's environment (metered API billing), or a subscription login in `~/.claude`, which is deleted with the sandbox. It also needs to reach `api.anthropic.com`, which needs a network policy entry for it (see [Network policies](#network-policies)). Any `llm` provider with `api = "anthropic-messages"` does not affect the bridge.
 
 ---
 
@@ -468,7 +519,7 @@ The flake uses the same dendritic flake-parts layout as `~/nix-config`. Every `.
 | `modules/home/llm.nix` | The LLM provider registry. |
 | `modules/home/hindsight.nix` | Hindsight memory: the prebuilt `hindsight` CLI binary (version-pinned with the server images), the local server, the optional dashboard and the harness extension. |
 | `modules/home/openshell-gateway.nix` | The gateway systemd service, its config and PKI. |
-| `lib/policy-gen.py` | Turns the allowlist and host ports into an OpenShell policy at launch time. |
+| `lib/policy-gen.py` | Builds the OpenShell policy at launch: its filesystem, Landlock and process sections, plus `network.policies` unchanged. |
 | `lib/devshell-env.py` | Filters the captured dev shell environment into the env file. |
 | `modules/checks.nix` | The flake checks. |
 
@@ -504,6 +555,6 @@ Five checks:
 | Image load fails | `openshell.engine` matches the gateway's driver. |
 | The project directory isn't mounted | The gateway's `enable_bind_mounts` (`openshell.gateway.settings`). |
 | `openshell status` shows no gateway | `systemctl --user status openshell-gateway`. |
-| A request is blocked | The address and port are in `network.allow`. Hostnames must resolve inside the list. |
+| A request is blocked | A `network.policies` entry matches the host and port, and its `binaries` include the program. With `allowed_ips`, the name must also resolve inside the list. OpenShell's log names the denial reason. |
 | Pi runs without memory | `systemctl --user status agent-hindsight`, and that an LLM is set (rebuilds warn when it isn't). |
 | The dashboard is down or empty | `systemctl --user status agent-hindsight-dashboard`, and that the server is running. |

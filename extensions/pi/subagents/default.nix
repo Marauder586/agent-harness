@@ -16,7 +16,7 @@
 #     former at launch by modules/harnesses/pi.nix; project agents with the
 #     same name win.
 #   - `llm-as-a-verifier` agents are not supported: they build a Python venv
-#     with pip/uv on first use, which the network allowlist blocks.
+#     with pip/uv on first use, which the network policies block.
 #
 # Built from the pinned `pi-subagents` input (a git tag; the package is not
 # on npm). It has no runtime dependencies: its only imports are Pi's own

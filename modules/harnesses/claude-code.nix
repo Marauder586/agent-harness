@@ -61,7 +61,7 @@ in {
       dp = llm.defaultProvider;
       useRegistry = dp != null && dp.api == "anthropic-messages";
       settingsFile = pkgs.writeText "claude-code-settings.json" (builtins.toJSON (lib.recursiveUpdate {
-          # Nothing outside the allowlist is reachable anyway; these stop
+          # Nothing outside the network policies is reachable anyway; these stop
           # Claude Code from trying (and logging) blocked connections.
           env = {
             DISABLE_TELEMETRY = "1";

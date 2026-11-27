@@ -5,32 +5,6 @@
   # `{pkgs}:` file keeps working when more arguments are offered.
   callWith = f: args: f (builtins.intersectAttrs (lib.functionArgs f) args);
 
-  # One allowlist entry: a CIDR (or bare IP) and the TCP ports it may be
-  # reached on. A bare string is shorthand for port 443 only.
-  allowEntryType = let
-    entry = lib.types.submodule {
-      options = {
-        cidr = lib.mkOption {
-          type = lib.types.str;
-          example = "10.20.0.0/16";
-          description = "IPv4/IPv6 address or CIDR range the sandbox may connect to.";
-        };
-        ports = lib.mkOption {
-          type = lib.types.nonEmptyListOf lib.types.port;
-          default = [443];
-          example = [443 22];
-          description = "TCP ports allowed on this range.";
-        };
-      };
-    };
-  in
-    lib.types.coercedTo lib.types.str (cidr: {inherit cidr;}) entry;
-
-  # Render entries in the allowlist line format read by lib/policy-gen.py:
-  #   <ip-or-cidr> [port[,port...]]
-  renderAllowConf = entries:
-    lib.concatMapStrings (e: "${e.cidr} ${lib.concatMapStringsSep "," toString e.ports}\n") entries;
-
   # Every <root>/<name>/SKILL.md becomes a skill entry for
   # flake.agentSkills: `{ src; packages; }`. `src` is the directory with
   # skill.nix stripped (store name skill-<name>). `packages` is

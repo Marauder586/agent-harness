@@ -8,7 +8,10 @@
 # extensions/<harness>/. No list is kept by hand anywhere:
 #
 #   programs.agent-harness = {
-#     network.allow = [ "10.0.0.5/32" { cidr = "10.0.1.0/24"; ports = [443 22]; } ];
+#     network.policies.gitlab = {
+#       endpoints = [ { host = "gitlab.example.com"; port = 443; } ];
+#       binaries = [ { path = "/**"; } ];
+#     };
 #     harnesses.claude-code = { enable = true; skills = [ "gitlab" ]; };
 #     harnesses.pi = { enable = true; skills = [ "gitlab" "commit-message" ];
 #                      extensions = [ "ws-edit" ]; };
@@ -17,8 +20,8 @@
 # Each enabled harness gets a command (`command`, default `agent-<harness>`)
 # that:
 #   1. loads the harness's Nix-built OCI image into docker/podman if missing,
-#   2. builds an OpenShell policy from network.allow and network.hostPorts
-#      (lib/policy-gen.py),
+#   2. builds an OpenShell policy (lib/policy-gen.py) whose
+#      network_policies are network.policies, unchanged,
 #   3. runs `openshell sandbox create --from <image> --policy <policy>
 #      --no-keep -- agent-launch "$@"`, with $PWD bind-mounted at
 #      /sandbox/work/<dirname> (so the project keeps its name, which
@@ -58,7 +61,7 @@ in {
 
     enabled = lib.filterAttrs (_: h: h.enable) cfg.harnesses;
 
-    allowConf = pkgs.writeText "agent-harness-allow.conf" (hl.renderAllowConf cfg.network.allow);
+    networkPolicies = pkgs.writeText "agent-harness-network-policies.json" (builtins.toJSON cfg.network.policies);
     policyGen = ../../lib/policy-gen.py;
     devshellEnv = ../../lib/devshell-env.py;
     # Where the wrapper mounts the captured dev shell environment (a
@@ -68,6 +71,22 @@ in {
     # Per-project persistent state (sessions), mounted read-write from
     # $XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<hash>.
     persistDir = "/sandbox/.persist";
+    # Writable Nix store (nixStore.overlay): /nix/store in the sandbox is a
+    # fuse-overlayfs of the host store (read-only lower layer) and a
+    # per-project upper layer on the host. This directory holds what Nix's
+    # local-overlay store needs to see: the lower store and its state
+    # (both read-only), the upper layer and the upper store's own state.
+    overlayDir = "/sandbox/.nix-store-overlay";
+    overlayStoreUrl = let
+      lower = "local?real=${overlayDir}/lower&state=${overlayDir}/lower-state&read-only=true";
+      enc = lib.replaceStrings ["?" "&" "="] ["%3F" "%26" "%3D"];
+    in "local-overlay://?lower-store=${enc lower}&upper-layer=${overlayDir}/upper&state=${overlayDir}/state&log=${overlayDir}/state/log&check-mount=false";
+    overlayNixConfig = ''
+      extra-experimental-features = nix-command flakes local-overlay-store read-only-local-store
+      store = ${overlayStoreUrl}
+      sandbox = false
+      build-users-group =
+    '';
 
     # Tools every sandbox gets, whatever the harness: a shell and coreutils
     # for the agent's bash tool, git, and the search tools Pi otherwise
@@ -181,6 +200,20 @@ in {
         if [ -f ${devshellDir}/host-env ]; then . ${devshellDir}/host-env; fi
         if [ -d ${persistDir} ]; then export AGENT_HARNESS_PERSIST=${persistDir}; fi
         ${exports hcfg.environment}
+        # Writable Nix store, when the wrapper mounted one: Nix uses the
+        # local-overlay store directly, no daemon. Builds run as this user
+        # without Nix's own build sandbox (OpenShell is the sandbox), and
+        # their downloads go through OpenShell's proxy and policies. After
+        # `environment`, so a NIX_CONFIG set there is appended (and its
+        # settings win) instead of replacing the store settings.
+        if [ -d ${overlayDir}/state ]; then
+          export NIX_CONFIG=${lib.escapeShellArg overlayNixConfig}"''${NIX_CONFIG:+
+        $NIX_CONFIG}"
+          unset NIX_REMOTE
+          # Downloads (curl in fixed-output builds) must trust OpenShell's
+          # TLS-inspecting proxy too.
+          if [ -n "''${SSL_CERT_FILE:-}" ]; then export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"; fi
+        fi
         # Set by the wrapper to where it mounted the project.
         cd "''${AGENT_HARNESS_WORKDIR:-$HOME}" 2>/dev/null || cd "$HOME"
         ${launchScript extensions mcpConfig}
@@ -235,7 +268,10 @@ in {
 
       env = pkgs.buildEnv {
         name = "agent-${name}-env";
-        paths = [hcfg.package launcher] ++ toolPaths extensions;
+        paths =
+          [hcfg.package launcher]
+          ++ toolPaths extensions
+          ++ lib.optional cfg.nixStore.overlay.enable cfg.nixStore.overlay.package;
       };
 
       # Store paths are referenced from `config`, so they land in the image
@@ -327,7 +363,8 @@ in {
           # which can hold secrets from the .envrc.
           work=$(mktemp -d -t agent-harness.XXXXXX)
           trap 'rm -rf "$work"' EXIT
-          ${if cfg.workspace.target != null
+          ${
+            if cfg.workspace.target != null
             then "ws=${lib.escapeShellArg cfg.workspace.target}"
             else ''
               # The project keeps its directory name, which Hindsight names
@@ -335,13 +372,14 @@ in {
               # in one bank.
               ws=/sandbox/work/$(basename "$PWD")
               [ "$ws" != /sandbox/work// ] || ws=/sandbox/work/root
-            ''}
+            ''
+          }
           policy=$work/policy.yaml
           python3 -I ${policyGen} \
             --uid "$(id -u)" --gid "$(id -g)" \
             ${lib.optionalString cfg.workspace.mount "--read-write \"$ws\""} \
-            --conf ${allowConf} \
-            ${lib.concatMapStringsSep " " (p: "--host-port ${toString p}") cfg.network.hostPorts} \
+            ${lib.optionalString cfg.nixStore.overlay.enable "--read-write /nix/store --read-write ${overlayDir}"} \
+            --network-policies ${networkPolicies} \
             > "$policy"
 
           # <harness>-<dir>-<6 hex>, at most 19 chars: OpenShell's limit for
@@ -471,9 +509,40 @@ in {
                 || echo "agent-harness: could not register GC roots for host tools" >&2
             fi
           ''}
+          storeMounted=""
+          ${lib.optionalString cfg.nixStore.overlay.enable ''
+            # Writable Nix store: one fuse-overlayfs per project, mounted in
+            # rootless podman's namespace (`podman unshare`), where the
+            # gateway's containers can see it. Kernel overlayfs can't be
+            # used: unprivileged mounts can't enable redirect_dir, without
+            # which Nix can't move directories into the store. The mount
+            # stays up between sessions and is shared by concurrent ones.
+            ovl="''${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/nix-overlay/$(printf %s "$PWD" | sha256sum | cut -c1-16)"
+            case $ovl in
+              *,* | *:*) echo "agent-harness: $ovl contains ',' or ':'; starting without a writable Nix store" >&2 ;;
+              *)
+                mkdir -p "$ovl/upper" "$ovl/work" "$ovl/merged" "$ovl/state"
+                printf '%s\n' "$PWD" > "$ovl/.path"
+                # shellcheck disable=SC2016 # expanded by the inner sh
+                if hostCmd ${engine} unshare sh -c \
+                  '${pkgs.util-linux}/bin/mountpoint -q "$1" || exec "$2" -o "lowerdir=/nix/store,upperdir=$3,workdir=$4" "$1"' \
+                  _ "$ovl/merged" ${lib.getExe pkgs.fuse-overlayfs} "$ovl/upper" "$ovl/work"; then
+                  addMount "$ovl/merged" /nix/store false
+                  addMount /nix/store ${overlayDir}/lower true
+                  addMount /nix/var/nix ${overlayDir}/lower-state true
+                  addMount "$ovl/upper" ${overlayDir}/upper false
+                  addMount "$ovl/state" ${overlayDir}/state false
+                  storeMounted=1
+                else
+                  echo "agent-harness: could not mount the writable Nix store (fuse-overlayfs); starting without it" >&2
+                fi
+                ;;
+            esac
+          ''}
           if [ -s "$envFile" ] || [ -f "$work/devshell/host-env" ]; then
             addMount "$work/devshell" ${devshellDir} true
-            addMount /nix/store /nix/store true
+            # The overlay already shows every host store path.
+            [ -n "$storeMounted" ] || addMount /nix/store /nix/store true
           fi
 
           if [ "$mounts" != '[]' ]; then
@@ -637,6 +706,24 @@ in {
       };
     };
   in {
+    imports = [
+      (lib.mkRemovedOptionModule ["programs" "agent-harness" "network" "allow"] ''
+        Use programs.agent-harness.network.policies, OpenShell's own
+        network_policies schema. An entry like
+          { cidr = "10.0.1.0/24"; ports = [443 22]; }
+        becomes
+          network.policies.lan = {
+            endpoints = [
+              { port = 443; tls = "skip"; allowed_ips = ["10.0.1.0/24"]; }
+              { port = 22; tls = "skip"; allowed_ips = ["10.0.1.0/24"]; }
+            ];
+            binaries = [{ path = "/**"; }];
+          };
+        Prefer `host` endpoints where the service has a name.'')
+      (lib.mkRemovedOptionModule ["programs" "agent-harness" "network" "hostPorts"] ''
+        Use a network.policies entry with
+          endpoints = [{ host = "host.openshell.internal"; port = <port>; tls = "skip"; }];'')
+    ];
     options.programs.agent-harness = {
       harnesses = lib.mapAttrs (name: def:
         lib.mkOption {
@@ -646,34 +733,29 @@ in {
         })
       harnessRegistry;
 
-      network = {
-        allow = lib.mkOption {
-          type = lib.types.listOf hl.allowEntryType;
-          default = [];
-          example = [
-            "10.0.0.5/32"
-            {
-              cidr = "10.0.1.0/24";
-              ports = [443 22];
-            }
-          ];
-          description = ''
-            IP ranges every sandbox may connect to. A bare string allows port
-            443 only. Everything else is denied.
-          '';
-        };
-
-        hostPorts = lib.mkOption {
-          type = lib.types.listOf lib.types.port;
-          default = [];
-          example = [9077];
-          description = ''
-            TCP ports on the host machine the sandbox may reach, as
-            `host.openshell.internal:<port>`. Needs a rootless podman
-            gateway, and the service must listen on a non-loopback address
-            (see README.md).
-          '';
-        };
+      network.policies = lib.mkOption {
+        type = lib.types.attrsOf (pkgs.formats.json {}).type;
+        default = {};
+        example = lib.literalExpression ''
+          {
+            gitlab = {
+              endpoints = [{ host = "gitlab.example.com"; port = 443; protocol = "rest"; access = "read-write"; }];
+              binaries = [{ path = "/**"; }];
+            };
+            inference = {
+              endpoints = [{ host = "llm.lan"; port = 8000; allowed_ips = [ "10.0.0.9/32" ]; }];
+              binaries = [{ path = "/**"; }];
+            };
+          }
+        '';
+        description = ''
+          OpenShell `network_policies`, in OpenShell's own schema (see its
+          policy reference): a map of named entries, each with `endpoints`
+          and `binaries`. Copied into every sandbox's policy unchanged and
+          validated by OpenShell when the sandbox is created. Everything
+          not allowed here is denied. LLM providers and Hindsight add
+          entries of their own (`llm-<name>`, `hindsight`).
+        '';
       };
 
       secretEnvFiles = lib.mkOption {
@@ -731,6 +813,33 @@ in {
             these are read; nothing else in your environment reaches the
             sandbox this way.
           '';
+        };
+      };
+
+      nixStore.overlay = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = cfg.openshell.engine == "podman";
+          defaultText = lib.literalExpression ''openshell.engine == "podman"'';
+          description = ''
+            Give every sandbox a writable /nix/store, so agents can run
+            `nix build`, `nix develop` and `nix flake check`, including on
+            dev shells and flakes they changed, without the Nix daemon. The
+            sandbox's /nix/store is a fuse-overlayfs of the host store
+            (read-only) and a per-project upper layer under
+            $XDG_STATE_HOME/agent-harness/nix-overlay/, used through Nix's
+            experimental local-overlay store. Downloads and builds run inside
+            the sandbox, under its network policies. Needs rootless podman.
+            The host store becomes readable to the agent. Garbage-collecting
+            the host store can remove paths a project's upper layer depends
+            on; delete that project's directory to start it over.
+          '';
+        };
+        package = lib.mkOption {
+          type = lib.types.package;
+          default = pkgs.nix;
+          defaultText = lib.literalExpression "pkgs.nix";
+          description = "Nix in the sandbox image, used with the overlay store.";
         };
       };
 
@@ -803,7 +912,18 @@ in {
         ++ map (n: {
           assertion = builtins.match "[A-Za-z_][A-Za-z0-9_]*" n != null;
           message = "programs.agent-harness.secretEnvFiles: \"${n}\" is not a valid environment variable name.";
-        }) (lib.attrNames cfg.secretEnvFiles);
+        }) (lib.attrNames cfg.secretEnvFiles)
+        ++ lib.mapAttrsToList (n: v: {
+          assertion = builtins.match "[A-Za-z0-9][A-Za-z0-9_.-]*" n != null && v ? endpoints && v ? binaries;
+          message = "programs.agent-harness.network.policies.${n}: needs a name of letters, digits, '_', '.' or '-', and both `endpoints` and `binaries` (OpenShell requires them).";
+        })
+        cfg.network.policies
+        ++ [
+          {
+            assertion = !cfg.nixStore.overlay.enable || cfg.openshell.engine == "podman";
+            message = "programs.agent-harness.nixStore.overlay needs openshell.engine = \"podman\" (it mounts through rootless podman's namespace); set nixStore.overlay.enable = false for docker.";
+          }
+        ];
       home.packages =
         [cfg.openshell.package]
         ++ lib.concatMap (b: [b.wrapper] ++ b.hostWrappers) (lib.attrValues built);

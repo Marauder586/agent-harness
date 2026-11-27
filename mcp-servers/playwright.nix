@@ -2,7 +2,7 @@
 # through a headless Chromium. Chromium comes bundled in nixpkgs'
 # playwright-mcp, so nothing is downloaded inside the sandbox.
 #
-# The browser can only reach what the sandbox allowlist permits, plus
+# The browser can only reach what the sandbox network policies allow, plus
 # servers listening inside the sandbox itself (e.g. a dev server on
 # localhost).
 #

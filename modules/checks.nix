@@ -2,8 +2,8 @@
 #   - skill-names: each skills/<name>/SKILL.md declares `name: <name>`
 #     (the portable form; Claude Code and other spec implementations
 #     require it).
-#   - policy-gen: the allowlist → policy generator accepts a sample and
-#     rejects the ranges OpenShell would refuse.
+#   - policy-gen: the policy generator passes network_policies through
+#     unchanged, rejects malformed ones and refuses to run as root.
 #   - home-manager: evaluates the home-manager aspect with every harness on
 #     and every skill and extension selected, and builds the wrappers.
 #     Building a wrapper builds its image stream script, not the image.
@@ -72,6 +72,7 @@ in {
                 openshell.engine = "podman";
                 openshell.gateway.enable = false;
                 openshell.package = fakeOpenshell;
+                nixStore.overlay.enable = false;
                 harnesses.pi.enable = true;
                 harnesses.claude-code.enable = true;
               };
@@ -79,7 +80,8 @@ in {
           ];
         };
         claudeWrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-claude-code") (throw "no agent-claude-code") hm.config.home.packages);
-        # Same, with hostTools on.
+        # Same, with hostTools and the writable Nix store (the default with
+        # podman) on.
         hmHost = inputs.home-manager.lib.homeManagerConfiguration {
           inherit pkgs;
           modules = [
@@ -121,7 +123,11 @@ in {
             stat -c %a "$src" > "$CASE/mode"
           fi
         '';
-        fakePodman = pkgs.writeShellScriptBin "podman" "exit 0";
+        # `podman unshare ...` (the overlay mount) is recorded, not run.
+        fakePodman = pkgs.writeShellScriptBin "podman" ''
+          if [ "$1" = unshare ] && [ -n "''${CASE-}" ]; then printf '%s\n' "$@" > "$CASE/unshare"; fi
+          exit 0
+        '';
         fakeDirenv = pkgs.writeShellScriptBin "direnv" ''
           case $1 in
             status)
@@ -223,7 +229,7 @@ in {
           jq -e --arg p "$PWD" '.podman.mounts | any(.source == $p and .target == "/sandbox/work/proj" and (.read_only | not))' "$CASE/mounts.json" >/dev/null \
             || fail "project not mounted at /sandbox/work/proj"
           grep -qxF "AGENT_HARNESS_WORKDIR=/sandbox/work/proj" "$CASE/args" || fail "no AGENT_HARNESS_WORKDIR"
-          grep -qF 'read_write: [/tmp, /dev/null, /dev/shm, "/sandbox/work/proj"]' "$CASE/policy.yaml" || fail "project not writable in the policy"
+          jq -e '.filesystem_policy.read_write | index("/sandbox/work/proj")' "$CASE/policy.yaml" >/dev/null || fail "project not writable in the policy"
           for v in DIRENV_DIR __fake TERM_PROGRAM XDG_DATA_DIRS EDITOR; do hasNot $v; done
           [ "$(env -i "$bash" -c '. "$1"; printf %s "$SECRET"' _ "$CASE/env")" = "$(printf '%s\n%s' "it's \"quoted\" \$(touch pwned)" "second line")" ] \
             || fail "SECRET mangled"
@@ -296,7 +302,20 @@ in {
           PATH="$TMPDIR/profile/bin:/run/wrappers/bin:$HOME/.local/bin:${fakeNixStore}/bin:$PATH" \
             TERMINFO_DIRS="$TMPDIR/profile/share" SECRET_TOKEN=hunter2 \
             ${hostToolsWrapper} 2> "$CASE/err" || { cat "$CASE/err"; fail "wrapper failed"; }
-          storeMounted || fail "no /nix/store mount"
+          # The writable store replaces the read-only /nix/store mount.
+          ! storeMounted || fail "read-only /nix/store mounted over the overlay"
+          ovl=$(jq -r '.podman.mounts[] | select(.target == "/nix/store" and (.read_only | not)) | .source' "$CASE/mounts.json")
+          case $ovl in */agent-harness/nix-overlay/*/merged) ;; *) fail "no writable /nix/store overlay mount: $ovl" ;; esac
+          [ "$(cat "''${ovl%/merged}/.path")" = "$PWD" ] || fail "overlay .path"
+          for t in lower:true lower-state:true upper:false state:false; do
+            jq -e --arg t "/sandbox/.nix-store-overlay/''${t%%:*}" --argjson ro "''${t#*:}" \
+              '.podman.mounts | any(.target == $t and .read_only == $ro)' "$CASE/mounts.json" >/dev/null || fail "overlay mount ''${t%%:*}"
+          done
+          grep -qx 'lowerdir=/nix/store,upperdir=.*/upper,workdir=.*/work' <(sed -n 's/^-o$//; /^lowerdir=/p' "$CASE/unshare" | tr -d '\n'; echo) \
+            || grep -q 'lowerdir=/nix/store' "$CASE/unshare" || fail "unshare: $(cat "$CASE/unshare")"
+          grep -q 'fuse-overlayfs' "$CASE/unshare" || fail "no fuse-overlayfs in unshare"
+          jq -e '(.filesystem_policy.read_write | index("/nix/store")) and (.filesystem_policy.read_only | index("/nix/store") | not)' "$CASE/policy.yaml" >/dev/null \
+            || fail "store not writable in the policy"
           [ ! -e "$CASE/env" ] || fail "dev shell env without a dev shell"
           grep -qF '${pkgs.hello}/bin' "$CASE/host-env" || fail "profile bin not resolved: $(cat "$CASE/host-env")"
           grep -q '^export PATH="''${PATH:+$PATH:}"' "$CASE/host-env" || fail "host PATH not appended"
@@ -321,23 +340,23 @@ in {
         touch $out
       '';
 
-      policy-gen = pkgs.runCommand "check-policy-gen" {nativeBuildInputs = [pkgs.python3];} ''
+      policy-gen = pkgs.runCommand "check-policy-gen" {nativeBuildInputs = [pkgs.python3 pkgs.jq];} ''
         gen() { python3 -I ${../lib/policy-gen.py} --uid 1000 --gid 100 "$@"; }
-        printf '10.0.0.5 443,22\n192.168.1.0/24\n' > ok.conf
-        gen --conf ok.conf > policy.yaml
-        grep -q 'port: 22' policy.yaml
-        grep -q '"192.168.1.0/24"' policy.yaml
-        gen --conf ok.conf --host-port 9077 > host.yaml
-        grep -q 'host: host.openshell.internal' host.yaml
-        if gen --conf ok.conf --host-port 22 >/dev/null 2>&1; then echo "accepted host-port overlapping allowlist"; exit 1; fi
-        for bad in 127.0.0.1 169.254.169.254 0.0.0.0/0 ::1 'not-an-ip'; do
-          echo "$bad" > bad.conf
-          if gen --conf bad.conf >/dev/null 2>&1; then echo "accepted $bad"; exit 1; fi
+        # network_policies pass through unchanged; the rest is ours.
+        printf '%s' '{"gitlab":{"endpoints":[{"host":"gitlab.example.com","port":443,"protocol":"rest","access":"read-only"}],"binaries":[{"path":"/**"}]}}' > net.json
+        gen --network-policies net.json > policy.json
+        jq -e --slurpfile n net.json '.network_policies == $n[0]' policy.json >/dev/null
+        jq -e '.process == {run_as_user: "1000", run_as_group: "100"} and .landlock.compatibility == "hard_requirement"' policy.json >/dev/null
+        gen 2>err.txt | jq -e 'has("network_policies") | not' >/dev/null
+        grep -q 'sandbox has no network' err.txt
+        for bad in '[]' '{"x":[]}' '{"x":1}'; do
+          printf '%s' "$bad" > bad.json
+          if gen --network-policies bad.json >/dev/null 2>&1; then echo "accepted $bad"; exit 1; fi
         done
         if python3 -I ${../lib/policy-gen.py} --uid 0 --gid 0 >/dev/null 2>&1; then
           echo "accepted root"; exit 1
         fi
-        gen --read-write '/home/u/my "proj"/' | grep -qF 'read_write: [/tmp, /dev/null, /dev/shm, "/home/u/my \"proj\""]'
+        gen --read-write '/home/u/my "proj"/' | jq -e '.filesystem_policy.read_write == ["/tmp", "/dev/null", "/dev/shm", "/home/u/my \"proj\""]' >/dev/null
         for bad in / relative; do
           if gen --read-write "$bad" >/dev/null 2>&1; then echo "accepted --read-write $bad"; exit 1; fi
         done
@@ -393,13 +412,16 @@ in {
               model = "test-model";
             };
           };
-          network.allow = [
-            "10.0.0.5/32"
-            {
-              cidr = "10.0.1.0/24";
-              ports = [443 22];
-            }
-          ];
+          network.policies.lan = {
+            endpoints = [
+              {
+                port = 22;
+                tls = "skip";
+                allowed_ips = ["10.0.1.0/24"];
+              }
+            ];
+            binaries = [{path = "/**";}];
+          };
           harnesses =
             lib.mapAttrs (n: def: {
               enable = true;
@@ -418,6 +440,23 @@ in {
         # Broken configs whose assertions must fail, with a word the
         # failing message must contain. Evaluated only, never built.
         mustFail = {
+          provider-allow-removed = {
+            word = "allow was removed";
+            cfg.llm.providers.old = {
+              baseUrl = "http://10.0.0.9:8000/v1";
+              allow = ["10.0.0.9/32"];
+              models = [{id = "m";}];
+            };
+          };
+          policy-without-binaries = {
+            word = "network.policies.nobin";
+            cfg.network.policies.nobin.endpoints = [
+              {
+                host = "x.example";
+                port = 443;
+              }
+            ];
+          };
           loopback-provider = {
             word = "loopback";
             cfg.llm.providers.here = {
@@ -499,6 +538,7 @@ in {
         dashSvc = hm.config.systemd.user.services.agent-hindsight-dashboard;
         dashScript = toString dashSvc.Service.ExecStart;
 
+        netPolicies = hm.config.programs.agent-harness.network.policies;
         hostHarnesses = lib.filterAttrs (_: def: def.supportsHost or false) harnesses;
         exeOf = cmd: lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == cmd) (throw "no ${cmd} in home.packages") hm.config.home.packages);
         # hindsight off: no CLI in home.packages, no API URL session variable.
@@ -509,6 +549,42 @@ in {
         assert lib.hasInfix "--server-san host.openshell.internal" (toString gwSvc.Service.ExecStartPre);
         assert toString gwSvc.Service.ExecStart == lib.getExe gwPkg;
         assert lib.elem "podman.socket" gwSvc.Unit.Wants;
+        # network.policies: user entries, one llm-<provider> entry per
+        # provider from its baseUrl, and Hindsight's host entry; the removed
+        # network options fail evaluation.
+        assert netPolicies ? lan;
+        assert netPolicies.llm-local.endpoints
+        == [
+          {
+            host = "10.0.0.9";
+            port = 8000;
+            allowed_ips = ["10.0.0.9/32"];
+          }
+        ];
+        assert netPolicies.llm-anthropic-gw.endpoints
+        == [
+          {
+            host = "10.0.0.10";
+            port = 4000;
+            allowed_ips = ["10.0.0.10/32"];
+          }
+        ];
+        assert (lib.head netPolicies.hindsight.endpoints).host == "host.openshell.internal";
+        assert (lib.head netPolicies.hindsight.endpoints).port == 9077;
+        assert (hmEval {
+          llm.providers.named = {
+            baseUrl = "https://api.example.com/v1";
+            models = [{id = "m";}];
+          };
+        }).config.programs.agent-harness.network.policies.llm-named.endpoints
+        == [
+          {
+            host = "api.example.com";
+            port = 443;
+          }
+        ];
+        assert !(builtins.tryEval (hmEval {network.allow = ["10.0.0.5/32"];}).config.programs.agent-harness.network.allow).success;
+        assert !(builtins.tryEval (hmEval {network.hostPorts = [9077];}).config.programs.agent-harness.network.hostPorts).success;
         assert retainsEnv hm.config ? HINDSIGHT_MAX_PARALLEL_RETAINS;
         assert (retainsEnv hm.config).HINDSIGHT_MAX_PARALLEL_RETAINS == "3";
         assert !(retainsEnv retainsNull ? HINDSIGHT_MAX_PARALLEL_RETAINS);

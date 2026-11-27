@@ -1,6 +1,6 @@
 # Long-term agent memory with Hindsight (https://hindsight.vectorize.io).
 # Home-manager aspect: runs the server as a podman user service, lets
-# sandboxes reach it (network.hostPorts), selects the `hindsight`
+# sandboxes reach it (a `hindsight` network policy), selects the `hindsight`
 # extension in every harness that has one, puts the `hindsight` CLI on the
 # host PATH, and optionally runs the web dashboard (Control Plane) as a
 # second container. Flake aspect: packages the CLI (per-system package
@@ -386,7 +386,19 @@ in {
             service is not created either.
           '';
 
-        programs.agent-harness.network.hostPorts = [cfg.port];
+        # The server on the host, as OpenShell's alias for it. Allowed only
+        # through OpenShell's trusted-gateway check (rootless podman with
+        # pasta); plain TCP, so no TLS detection.
+        programs.agent-harness.network.policies.hindsight = {
+          endpoints = [
+            {
+              host = "host.openshell.internal";
+              port = cfg.port;
+              tls = "skip";
+            }
+          ];
+          binaries = [{path = "/**";}];
+        };
 
         # The `hindsight` CLI in your own terminal, pointed at the local
         # server (the CLI reads HINDSIGHT_API_URL with the highest

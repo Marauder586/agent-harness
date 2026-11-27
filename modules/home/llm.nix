@@ -1,6 +1,6 @@
 # Home-manager aspect: one registry of LLM endpoints (`programs.agent-harness
 # .llm`), wired into every enabled harness, Hindsight and the network
-# allowlist. See README.md, "LLM providers".
+# policies. See README.md, "LLM providers".
 #
 # Warning: an `apiKeyFile` value is passed into the sandbox
 # (secretEnvFiles), where the agent can read it. For a key the agent must
@@ -9,30 +9,52 @@
   flake.modules.homeManager.agent-harness = {
     config,
     lib,
+    pkgs,
     ...
   }: let
-    hl = import ../../lib {inherit lib;};
     cfg = config.programs.agent-harness.llm;
 
     keyEnv = name: "AGENT_LLM_${lib.toUpper (lib.replaceStrings ["-" "."] ["_" "_"] name)}_API_KEY";
 
-    # http(s)://<ipv4>[:port][/...] → one allow entry; null for hostnames.
-    allowFromUrl = url: let
-      m = builtins.match "(https?)://([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)(:([0-9]+))?(/.*)?" url;
+    # http(s)://<host>[:port][/...] -> { host; port; ipv4 }, or null when
+    # the URL has another shape. ipv4 is the host when it is a literal
+    # IPv4 address, else null.
+    parseUrl = url: let
+      m = builtins.match "(https?)://(\\[[^]]+]|[^/:?#]+)(:([0-9]+))?([/?#].*)?" url;
+      host = builtins.elemAt m 1;
     in
       if m == null
       then null
       else {
-        cidr = "${builtins.elemAt m 1}/32";
-        ports = [
-          (
-            if builtins.elemAt m 3 != null
-            then lib.toInt (builtins.elemAt m 3)
-            else if builtins.elemAt m 0 == "https"
-            then 443
-            else 80
-          )
+        inherit host;
+        port =
+          if builtins.elemAt m 3 != null
+          then lib.toInt (builtins.elemAt m 3)
+          else if builtins.elemAt m 0 == "https"
+          then 443
+          else 80;
+        ipv4 =
+          if builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+" host != null
+          then host
+          else null;
+      };
+
+    # The OpenShell network policy entry a provider gets by default: its
+    # baseUrl's host and port. A literal IPv4 host also gets an
+    # `allowed_ips` entry for exactly that address, which OpenShell needs
+    # for literal-IP endpoints on private ranges. No `protocol`, so traffic
+    # is passed through uninspected, as an API client expects.
+    policyFromUrl = url: let
+      u = parseUrl url;
+    in
+      if u == null
+      then null
+      else {
+        endpoints = [
+          ({inherit (u) host port;}
+            // lib.optionalAttrs (u.ipv4 != null) {allowed_ips = ["${u.ipv4}/32"];})
         ];
+        binaries = [{path = "/**";}];
       };
 
     modelModule = {
@@ -79,6 +101,13 @@
       ...
     }: {
       options = {
+        # Removed: replaced by `network`. Kept hidden so setting it fails
+        # with a pointer (mkRemovedOptionModule only works at the top level).
+        allow = lib.mkOption {
+          type = lib.types.unspecified;
+          default = null;
+          visible = false;
+        };
         displayName = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -108,11 +137,25 @@
           default = {};
           description = "Pi `compat` overrides for the whole provider (e.g. thinkingFormat).";
         };
-        allow = lib.mkOption {
-          type = lib.types.listOf hl.allowEntryType;
-          default = lib.optional (allowFromUrl config.baseUrl != null) (allowFromUrl config.baseUrl);
-          defaultText = lib.literalMD "the baseUrl's address and port, when baseUrl uses an IP address";
-          description = "Allowlist entries the sandbox needs to reach this endpoint.";
+        network = lib.mkOption {
+          type = lib.types.nullOr (pkgs.formats.json {}).type;
+          default = policyFromUrl config.baseUrl;
+          defaultText = lib.literalMD "the baseUrl's host and port as one endpoint, for every binary";
+          example = {
+            endpoints = [
+              {
+                host = "llm.lan";
+                port = 8000;
+                allowed_ips = ["10.0.0.9/32"];
+              }
+            ];
+            binaries = [{path = "/**";}];
+          };
+          description = ''
+            The OpenShell network policy entry the sandbox needs to reach this
+            endpoint, in OpenShell's schema. Added to network.policies as
+            `llm-<name>`. Null adds none (e.g. when another policy covers it).
+          '';
         };
         keyEnv = lib.mkOption {
           type = lib.types.str;
@@ -125,8 +168,8 @@
 
     defaultProvider = cfg.defaultProvider;
 
-    # Ranges policy-gen.py refuses at launch (OpenShell would block the
-    # whole endpoint), checked here so the error comes at evaluation.
+    # Addresses OpenShell never lets a sandbox reach (loopback, link-local),
+    # checked on each provider's baseUrl so the error comes at evaluation.
     ipv4Int = a: lib.foldl (acc: x: acc * 256 + lib.toInt x) 0 (lib.splitString "." a);
     pow2 = n: lib.foldl (acc: _: acc * 2) 1 (lib.range 1 n);
     parseIpv4 = c: let
@@ -202,17 +245,26 @@
       (lib.mkIf (cfg.providers != {}) {
         assertions = lib.concatLists (lib.mapAttrsToList (n: p: [
             {
-              assertion = p.allow != [];
-              message = "programs.agent-harness.llm.providers.${n}: baseUrl uses a hostname, so set `allow` to the addresses the sandbox may reach it on.";
+              assertion = p.allow == null;
+              message = "programs.agent-harness.llm.providers.${n}.allow was removed. The provider now gets an OpenShell network policy entry, `network` (network.policies.llm-${n}), which defaults to the baseUrl's host and port; set `network` in OpenShell's schema to change it.";
             }
             {
-              assertion = !lib.any (e: isLocalRange e.cidr) p.allow;
+              assertion = parseUrl p.baseUrl != null || p.network != null;
+              message = "programs.agent-harness.llm.providers.${n}: could not read a host from baseUrl; set `network` to the OpenShell policy entry the sandbox needs.";
+            }
+            {
+              assertion = let
+                u = parseUrl p.baseUrl;
+              in
+                u == null || !(isLocalRange (lib.removePrefix "[" (lib.removeSuffix "]" u.host)) || lib.toLower u.host == "localhost");
               message = "programs.agent-harness.llm.providers.${n}: loopback and link-local addresses (127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10) are never reachable from the sandbox. For a model served on this machine, listen on a LAN address and use that in baseUrl.";
             }
           ])
           cfg.providers);
 
-        programs.agent-harness.network.allow = lib.concatMap (p: p.allow) (lib.attrValues cfg.providers);
+        programs.agent-harness.network.policies =
+          lib.mapAttrs' (n: p: lib.nameValuePair "llm-${n}" p.network)
+          (lib.filterAttrs (_: p: p.network != null) cfg.providers);
         programs.agent-harness.secretEnvFiles =
           lib.mapAttrs' (_: p: lib.nameValuePair p.keyEnv p.apiKeyFile)
           (lib.filterAttrs (_: p: p.apiKeyFile != null) cfg.providers);

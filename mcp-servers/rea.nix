@@ -5,7 +5,7 @@
 # Built from the published npm tarball (the `rea-agents` input), not the
 # repo: the tarball ships compiled dist/ and bundles its node_modules, so
 # nothing is fetched at build or run time. Upstream's own mcp.json runs
-# `npx rea-agents mcp`, which the sandbox allowlist would block.
+# `npx rea-agents mcp`, which the sandbox network policies would block.
 #
 # Optional pieces not installed: the `frida` optionalDependency (runtime
 # instrumentation) and native engines (Ghidra, Hopper, IDA). Static
