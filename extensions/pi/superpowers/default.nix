@@ -11,9 +11,13 @@
 # imports are node builtins and @earendil-works/pi-coding-agent, which Pi's
 # extension loader aliases to its own copy — no runtime dependencies to pin.
 #
-# Skills reach Pi through package.json's `pi.skills` (Pi packages carry
-# skills as well as extensions, docs/packages.md), so they load with the
-# extension; there is nothing to add to settings.json `skills`.
+# Skills reach Pi through package.json's `pi.skills`, but only when no
+# settings.json `skills` entry exists: settings skills act as a filter over
+# every loaded package's skills (package-manager.js applyPackageFilter), so
+# with the harness's own skills selected the package's 15 register disabled.
+# The passthru.piSkillsDir below hands the dir to the harness, which appends
+# it to settings.json `skills` — they then load as plain user skills, once,
+# and only while this extension is selected.
 {
   pkgs,
   inputs,
@@ -27,6 +31,7 @@ in
       homepage = "https://github.com/obra/superpowers";
       license = lib.licenses.mit;
     };
+    passthru.piSkillsDir = "${src}/skills";
   } ''
     # The extension resolves the skills dir relative to its own location
     # (<packageRoot>/skills), so the layout under $out must match the repo.

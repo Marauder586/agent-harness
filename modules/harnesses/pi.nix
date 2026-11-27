@@ -15,6 +15,9 @@
 #     An extension whose passthru sets `disablesPiBuiltinMcp` gets
 #     `-builtin:mcp` added to settings.json, so the two never both run and
 #     the adapter has nothing to rewrite at startup.
+#   - An extension whose passthru sets `piSkillsDir` (e.g. superpowers) has
+#     that directory appended to settings.json `skills` (see the comment at
+#     the skills list for why package manifest skills are not enough).
 #   - An extension whose passthru sets `piAgentsDir` (e.g. subagents) gets
 #     that directory's *.md agent definitions copied into
 #     $PI_CODING_AGENT_DIR/agents/ (writable, so the /subagents overlay can
@@ -73,7 +76,15 @@ in {
       });
       settingsFile = pkgs.writeText "pi-settings.json" (builtins.toJSON (lib.recursiveUpdate {
           enableInstallTelemetry = false;
-          skills = ["${skills}"];
+          skills =
+            ["${skills}"]
+            # Package skills load through package.json `pi.skills` only when
+            # settings.json has no `skills` entry — settings skills act as a
+            # filter over every package's skills, and this entry never matches
+            # them (extensions/pi/superpowers has the story). Extensions that
+            # carry skills therefore expose them via passthru.piSkillsDir and
+            # load as plain user skills from their own store path.
+            ++ lib.unique (lib.concatMap (e: lib.optional (e ? piSkillsDir) "${e.piSkillsDir}") extensions);
           extensions =
             map (e: "${e}") extensions
             ++ lib.optional (lib.any (e: e.disablesPiBuiltinMcp or false) extensions) "-builtin:mcp";

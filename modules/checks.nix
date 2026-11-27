@@ -18,6 +18,9 @@
 #   - devshell: runs a real sandboxed wrapper against fake openshell,
 #     podman, direnv and nix, and checks dev shell selection, the leading
 #     flag parsing, the env filter and the mounts it asks for.
+#   The home-manager check also asserts superpowers' skills are selected in
+#   the pi wrapper's settings.json (a settings skills entry filters package
+#   manifest skills away — see extensions/pi/superpowers).
 {
   inputs,
   config,
@@ -494,6 +497,15 @@ in {
                 if grep -q -- --no-sandbox "$f"; then echo "${n}-host: $f disables Chromium's sandbox"; exit 1; fi
               done
             '') (lib.attrNames hostHarnesses)}
+            # piSkillsDir (superpowers): settings.json `skills` filters every
+            # package manifest's skills away, so the skills must be selected
+            # explicitly — extensions/pi/superpowers has the story. The
+            # settings file is buried wrapper -> image stream -> conf.
+            piStream=$(grep -o '/nix/store/[^ ]*-stream-agent-harness-pi' ${lib.getExe hm.config.programs.agent-harness.harnesses.pi.package} | head -1)
+            piConf=$(grep -o '/nix/store/[^ ]*-conf.json' "$piStream" | head -1)
+            piSettings=$(grep -o '/nix/store/[^ ]*-pi-settings.json' "$piConf" | head -1)
+            jq -e '.skills | any(contains("superpowers"))' "$piSettings" > /dev/null \
+              || { echo 'pi: superpowers skills not selected in settings.json'; exit 1; }
           '';
     };
   };
