@@ -16,7 +16,7 @@
     lib.attrNames (lib.filterAttrs (_: def: def.extensions ? hindsight) config.flake.agentHarnesses);
 
   # The CLI and both server images move together: bump all three here.
-  version = "1.2.3";
+  version = "1.3.0";
 
   # Release assets per platform (only linux: the binary is ELF, patched
   # for nix's glibc/openssl with autoPatchelfHook). Only x86_64-linux is
@@ -25,11 +25,11 @@
   cliAssets = {
     x86_64-linux = {
       asset = "linux-amd64";
-      hash = "sha256-47fIP9Tqs6wGFBmc6IimNseDNIqloAGsyD42S3No+W4=";
+      hash = "sha256-+/7SHV7TBys6X45mfaYEgm4BjLsKzJJyarzIAPT7vsc=";
     };
     aarch64-linux = {
       asset = "linux-arm64";
-      hash = "sha256-LuIREACWSlnQ2DsGNyhlO3Efl0dy9beck0LItNS6ht0=";
+      hash = "sha256-UbnSEqfEdOHLfeA6oO21qt5pUQ27WNVXbX7QJvK+6t0=";
     };
   };
 in {
@@ -111,6 +111,12 @@ in {
         HINDSIGHT_API_WORKER_MAX_SLOTS = toString cfg.workerMaxSlots;
       }
       // lib.optionalAttrs (cfg.workers != null) {HINDSIGHT_API_WORKERS = toString cfg.workers;}
+      // lib.optionalAttrs (cfg.mentalModels.minRefreshIntervalSeconds != null) {
+        HINDSIGHT_API_MENTAL_MODEL_MIN_REFRESH_INTERVAL_SECONDS = toString cfg.mentalModels.minRefreshIntervalSeconds;
+      }
+      // lib.optionalAttrs (cfg.mentalModels.refreshTickSeconds != null) {
+        HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS = toString cfg.mentalModels.refreshTickSeconds;
+      }
       // cfg.extraEnvironment;
 
     start = pkgs.writeShellScript "agent-hindsight-start" ''
@@ -179,7 +185,7 @@ in {
 
       image = lib.mkOption {
         type = lib.types.str;
-        default = "ghcr.io/vectorize-io/hindsight-api:${version}@sha256:2f318da3489f6493a5ec78f3d7019cd70835383fe4f4ffd1af9e080babd91d6c";
+        default = "ghcr.io/vectorize-io/hindsight-api:${version}@sha256:c054765e9196fb1fe63497be06bcb55256c9024cc9314f951dc59858985ab242";
         description = "Hindsight API image (the full variant: it bundles the local embedding and rerank models).";
       };
 
@@ -216,6 +222,54 @@ in {
           (HINDSIGHT_API_LLM_MAX_CONCURRENT). Null uses the server's own
           default.
         '';
+      };
+
+      mentalModels = {
+        trigger = lib.mkOption {
+          type = lib.types.enum ["cron" "auto-refresh" "manual"];
+          default = "cron";
+          description = ''
+            When the extension's pages (Hindsight mental models) refresh
+            (HINDSIGHT_PAGE_TRIGGER_TYPE): `"cron"` on `mentalModels.cron`,
+            and only when new memories arrived since the last refresh;
+            `"auto-refresh"` after every consolidation, i.e. whenever new
+            memories are processed (most current, one LLM synthesis per page
+            each time); `"manual"` never on their own. Each session re-syncs
+            the pages the extension created to this, existing ones included.
+          '';
+        };
+        cron = lib.mkOption {
+          type = lib.types.str;
+          default = "H * * * *";
+          example = "H H(0-5) * * *";
+          description = ''
+            Refresh schedule for `trigger = "cron"`
+            (HINDSIGHT_PAGE_TRIGGER_CRON): UTC, standard 5 fields. A field
+            written as `H` gets a per-page value hashed from the bank and page
+            name, so pages don't all refresh at once: `"H * * * *"` (the
+            default) is hourly at each page's own minute, `"H H * * *"` daily.
+          '';
+        };
+        minRefreshIntervalSeconds = lib.mkOption {
+          type = lib.types.nullOr lib.types.ints.unsigned;
+          default = null;
+          example = 21600;
+          description = ''
+            Server-wide floor between two refreshes of one mental model
+            (HINDSIGHT_API_MENTAL_MODEL_MIN_REFRESH_INTERVAL_SECONDS), whatever
+            triggered them. Null uses the server's default (0, no floor).
+          '';
+        };
+        refreshTickSeconds = lib.mkOption {
+          type = lib.types.nullOr lib.types.ints.positive;
+          default = null;
+          example = 60;
+          description = ''
+            How often the server checks for cron refreshes that are due
+            (HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS). Null uses the
+            server's default (300).
+          '';
+        };
       };
 
       workerMaxSlots = lib.mkOption {
@@ -259,7 +313,7 @@ in {
 
         image = lib.mkOption {
           type = lib.types.str;
-          default = "ghcr.io/vectorize-io/hindsight-control-plane:${version}@sha256:2d5ff37b44e03b9b660f4953b2a9780c216358b232281d92e65a080eb6202a6d";
+          default = "ghcr.io/vectorize-io/hindsight-control-plane:${version}@sha256:df58ce2597e837f359684cfe0e004aaa93bbb89983f1f1b8bd2cab881b457554";
           description = "Hindsight Control Plane image (stateless: the dashboard only proxies the API).";
         };
 
@@ -350,6 +404,8 @@ in {
               HINDSIGHT_API_URL = "http://host.openshell.internal:${toString cfg.port}";
               # Pinned by Nix; the runtime must not re-stage itself from npm.
               HINDSIGHT_AUTO_UPDATE = "false";
+              HINDSIGHT_PAGE_TRIGGER_TYPE = cfg.mentalModels.trigger;
+              HINDSIGHT_PAGE_TRIGGER_CRON = cfg.mentalModels.cron;
             }
             // lib.optionalAttrs (cfg.maxParallelRetains != null) {
               HINDSIGHT_MAX_PARALLEL_RETAINS = toString cfg.maxParallelRetains;

@@ -79,6 +79,30 @@ in {
           ];
         };
         claudeWrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-claude-code") (throw "no agent-claude-code") hm.config.home.packages);
+        # Same, with hostTools on.
+        hmHost = inputs.home-manager.lib.homeManagerConfiguration {
+          inherit pkgs;
+          modules = [
+            hmModule
+            {
+              home.username = "check";
+              home.homeDirectory = "/home/check";
+              home.stateVersion = "26.05";
+              programs.agent-harness = {
+                openshell.engine = "podman";
+                openshell.gateway.enable = false;
+                openshell.package = fakeOpenshell;
+                devshell.auto = false;
+                hostTools.enable = true;
+                harnesses.pi.enable = true;
+              };
+            }
+          ];
+        };
+        hostToolsWrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-pi") (throw "no agent-pi") hmHost.config.home.packages);
+        fakeNixStore = pkgs.writeShellScriptBin "nix-store" ''
+          printf '%s\n' "$@" > "$CASE/nix-store"
+        '';
         wrapper = lib.getExe (lib.findFirst (p: (p.meta.mainProgram or "") == "agent-pi") (throw "no agent-pi") hm.config.home.packages);
         # Records what the wrapper asked for: the arguments, the mounts, and
         # a copy of the dev shell env file (deleted when the wrapper exits).
@@ -87,11 +111,13 @@ in {
           prev=""
           for a in "$@"; do
             [ "$prev" != --driver-config-json ] || printf '%s' "$a" > "$CASE/mounts.json"
+            [ "$prev" != --policy ] || cp "$a" "$CASE/policy.yaml"
             prev=$a
           done
           src=$(${lib.getExe pkgs.jq} -r '.podman.mounts[] | select(.target == "/sandbox/.devshell") | .source' "$CASE/mounts.json")
           if [ -n "$src" ]; then
-            cp "$src/env" "$CASE/env"
+            [ ! -f "$src/env" ] || cp "$src/env" "$CASE/env"
+            [ ! -f "$src/host-env" ] || cp "$src/host-env" "$CASE/host-env"
             stat -c %a "$src" > "$CASE/mode"
           fi
         '';
@@ -191,8 +217,13 @@ in {
           has FOO=bar
           has HOME=/sandbox
           has TMPDIR=/tmp
-          has PROJECT_DATA=/sandbox/work/data
-          has PATH=/nix/store/fake-hello/bin:/sandbox/work/bin:/base
+          # The project keeps its directory name: /sandbox/work/<dirname>.
+          has PROJECT_DATA=/sandbox/work/proj/data
+          has PATH=/nix/store/fake-hello/bin:/sandbox/work/proj/bin:/base
+          jq -e --arg p "$PWD" '.podman.mounts | any(.source == $p and .target == "/sandbox/work/proj" and (.read_only | not))' "$CASE/mounts.json" >/dev/null \
+            || fail "project not mounted at /sandbox/work/proj"
+          grep -qxF "AGENT_HARNESS_WORKDIR=/sandbox/work/proj" "$CASE/args" || fail "no AGENT_HARNESS_WORKDIR"
+          grep -qF 'read_write: [/tmp, /dev/null, /dev/shm, "/sandbox/work/proj"]' "$CASE/policy.yaml" || fail "project not writable in the policy"
           for v in DIRENV_DIR __fake TERM_PROGRAM XDG_DATA_DIRS EDITOR; do hasNot $v; done
           [ "$(env -i "$bash" -c '. "$1"; printf %s "$SECRET"' _ "$CASE/env")" = "$(printf '%s\n%s' "it's \"quoted\" \$(touch pwned)" "second line")" ] \
             || fail "SECRET mangled"
@@ -254,6 +285,30 @@ in {
           mkdir -p "$CASE"
           ${claudeWrapper} 2> "$CASE/err" || { cat "$CASE/err"; fail "claude wrapper failed"; }
           [ -z "$(persistSrc)" ] || fail "claude-code got a persist mount"
+
+          # hostTools: profile symlinks resolve into /nix/store and are
+          # appended; entries outside the store and unlisted variables are
+          # left out; the store paths get GC roots.
+          c=host-tools
+          CASE=$TMPDIR/case-$c
+          mkdir -p "$CASE"
+          ln -s ${pkgs.hello} "$TMPDIR/profile"
+          PATH="$TMPDIR/profile/bin:/run/wrappers/bin:$HOME/.local/bin:${fakeNixStore}/bin:$PATH" \
+            TERMINFO_DIRS="$TMPDIR/profile/share" SECRET_TOKEN=hunter2 \
+            ${hostToolsWrapper} 2> "$CASE/err" || { cat "$CASE/err"; fail "wrapper failed"; }
+          storeMounted || fail "no /nix/store mount"
+          [ ! -e "$CASE/env" ] || fail "dev shell env without a dev shell"
+          grep -qF '${pkgs.hello}/bin' "$CASE/host-env" || fail "profile bin not resolved: $(cat "$CASE/host-env")"
+          grep -q '^export PATH="''${PATH:+$PATH:}"' "$CASE/host-env" || fail "host PATH not appended"
+          ! grep -qE 'wrappers|\.local|hunter2' "$CASE/host-env" || fail "host-env leaks: $(cat "$CASE/host-env")"
+          grep -qxF 'export TERMINFO_DIRS=${pkgs.hello}/share' <(sed 's/^\[ -n "''${TERMINFO_DIRS+x}" \] || //' "$CASE/host-env") \
+            || fail "TERMINFO_DIRS: $(cat "$CASE/host-env")"
+          grep -qxF '${pkgs.hello}' "$CASE/nix-store" && grep -qx -- --add-root "$CASE/nix-store" || fail "no GC root"
+          # Loaded as agent-launch does: host tools come after the sandbox PATH.
+          case $(env -i PATH=/base "$bash" -c '. "$1"; printf %s "$PATH"' _ "$CASE/host-env") in
+            /base:${pkgs.hello}/bin:*) ;;
+            *) fail "PATH order" ;;
+          esac
           touch $out
         '';
 
@@ -282,6 +337,10 @@ in {
         if python3 -I ${../lib/policy-gen.py} --uid 0 --gid 0 >/dev/null 2>&1; then
           echo "accepted root"; exit 1
         fi
+        gen --read-write '/home/u/my "proj"/' | grep -qF 'read_write: [/tmp, /dev/null, /dev/shm, "/home/u/my \"proj\""]'
+        for bad in / relative; do
+          if gen --read-write "$bad" >/dev/null 2>&1; then echo "accepted --read-write $bad"; exit 1; fi
+        done
         touch $out
       '';
 
@@ -305,6 +364,11 @@ in {
             llmMaxConcurrent = 8;
             workerMaxSlots = 8;
             workers = 4;
+            mentalModels = {
+              cron = "H H * * *";
+              minRefreshIntervalSeconds = 21600;
+              refreshTickSeconds = 60;
+            };
             dashboard.enable = true;
           };
           llm = {
@@ -448,18 +512,25 @@ in {
         assert retainsEnv hm.config ? HINDSIGHT_MAX_PARALLEL_RETAINS;
         assert (retainsEnv hm.config).HINDSIGHT_MAX_PARALLEL_RETAINS == "3";
         assert !(retainsEnv retainsNull ? HINDSIGHT_MAX_PARALLEL_RETAINS);
+        # hindsight.mentalModels: the page trigger reaches the harness
+        # environment (cron by default), the server settings its container.
+        assert (retainsEnv hm.config).HINDSIGHT_PAGE_TRIGGER_TYPE == "cron";
+        assert (retainsEnv hm.config).HINDSIGHT_PAGE_TRIGGER_CRON == "H H * * *";
+        assert (retainsEnv retainsNull).HINDSIGHT_PAGE_TRIGGER_CRON == "H * * * *";
+        assert lib.hasInfix "--env 'HINDSIGHT_API_MENTAL_MODEL_MIN_REFRESH_INTERVAL_SECONDS=21600'" (builtins.readFile (serverScript hm.config));
+        assert lib.hasInfix "--env 'HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS=60'" (builtins.readFile (serverScript hm.config));
         assert lib.hasInfix "--env 'HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT=4'" (builtins.readFile (serverScript hm.config));
         assert lib.hasInfix "--env 'HINDSIGHT_API_LLM_MAX_CONCURRENT=8'" (builtins.readFile (serverScript hm.config));
         assert lib.hasInfix "--env 'HINDSIGHT_API_WORKER_MAX_SLOTS=8'" (builtins.readFile (serverScript hm.config));
         assert lib.hasInfix "--env 'HINDSIGHT_API_WORKERS=4'" (builtins.readFile (serverScript hm.config));
-        assert !(lib.hasInfix "MENTAL_MODEL_REFRESH" (builtins.readFile (serverScript mmNull)));
+        assert !(lib.hasInfix "MENTAL_MODEL" (builtins.readFile (serverScript mmNull)));
         assert !(lib.hasInfix "LLM_MAX_CONCURRENT" (builtins.readFile (serverScript mmNull)));
         assert !(lib.hasInfix "WORKER" (builtins.readFile (serverScript mmNull)));
         assert hm.config.systemd.user.services ? agent-hindsight-dashboard;
         assert lib.hasInfix "--network=host" (builtins.readFile dashScript);
         assert lib.hasInfix "--env 'HINDSIGHT_CP_DATAPLANE_API_URL=http://127.0.0.1:9077'" (builtins.readFile dashScript);
         assert lib.hasInfix "--env 'HINDSIGHT_CP_PORT=9999'" (builtins.readFile dashScript);
-        assert lib.hasInfix "ghcr.io/vectorize-io/hindsight-control-plane:1.2.3@sha256:" (builtins.readFile dashScript);
+        assert lib.hasInfix "ghcr.io/vectorize-io/hindsight-control-plane:1.3.0@sha256:" (builtins.readFile dashScript);
         assert !(retainsNull.systemd.user.services ? agent-hindsight-dashboard);
         # hindsight.enable puts the CLI on the host PATH, pointed at the
         # local server; without hindsight there is neither.

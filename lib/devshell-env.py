@@ -3,6 +3,7 @@
 Usage:
   devshell-env.py --json FILE              [--workspace SRC DST]
   devshell-env.py --direnv BASE_ENV NEW_ENV [--workspace SRC DST]
+  devshell-env.py --host HOST_ENV --vars NAME[,NAME...] [--roots FILE]
 
 --json reads `nix print-dev-env --json` output and keeps its exported
 variables. --direnv reads two `env -0` dumps, taken with
@@ -20,6 +21,20 @@ the sandbox PATH, keeping only /nix/store paths and paths inside the
 workspace (anything else does not exist in the sandbox; dropped entries are
 listed on stderr).
 
+--host reads an `env -0` dump of the user's own shell and keeps only the
+colon-separated path-list variables named in --vars (PATH, MANPATH,
+XDG_DATA_DIRS, ...). Nothing else is read, so tokens in the environment
+never reach the sandbox. Each entry is resolved through its symlinks
+(/run/current-system/sw/bin, ~/.nix-profile/bin and profile links all end
+in /nix/store) and kept only if it lands in /nix/store, which the sandbox
+mounts read-only. Everything else (/run/wrappers/bin, ~/.local/bin, /usr/bin
+on other distributions) does not exist there and is left out quietly.
+Host PATH entries go after the sandbox's own PATH, so they fill gaps and
+never shadow the harness, its skill tools or the dev shell. The other
+variables are set only where the sandbox and dev shell left them unset.
+--roots writes the store paths kept, one per line, for the wrapper to
+register as GC roots while the sandbox runs.
+
 Prints a POSIX shell file on stdout that `agent-launch` sources:
   [ -n "${NAME+x}" ] || export NAME='value'    # sandbox's own value wins
   export PATH='entries'"${PATH:+:$PATH}"
@@ -28,6 +43,7 @@ Prints nothing when the dev shell changes nothing.
 
 import argparse
 import json
+import os
 import re
 import shlex
 import sys
@@ -80,13 +96,56 @@ def from_direnv(base_path, new_path):
     return changed, base_dirs, new.get("PATH", "")
 
 
+STORE = "/nix/store/"
+
+
+def store_root(path):
+    """/nix/store/<hash>-<name>/bin -> /nix/store/<hash>-<name>."""
+    return STORE + path[len(STORE):].split("/", 1)[0]
+
+
+def from_host(path, names, roots_file):
+    env = read_env0(path)
+    out, roots = [], []
+    for k in names:
+        if not NAME.match(k):
+            sys.exit(f"agent-harness: --vars: bad variable name {k!r}")
+        kept = []
+        for d in env.get(k, "").split(":"):
+            r = os.path.realpath(d) if d else ""
+            if r.startswith(STORE) and r not in kept:
+                kept.append(r)
+                if store_root(r) not in roots:
+                    roots.append(store_root(r))
+        if not kept:
+            continue
+        v = shlex.quote(":".join(kept))
+        if k == "PATH":
+            out.append(f'export PATH="${{PATH:+$PATH:}}"{v}')
+        else:
+            out.append(f'[ -n "${{{k}+x}}" ] || export {k}={v}')
+    if roots_file:
+        with open(roots_file, "w", encoding="utf-8") as f:
+            f.write("".join(r + "\n" for r in roots))
+    if out:
+        print("# agent-harness: host tool paths (generated on the host)")
+        print("\n".join(out))
+
+
 def main():
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--json")
     src.add_argument("--direnv", nargs=2, metavar=("BASE_ENV", "NEW_ENV"))
+    src.add_argument("--host")
     ap.add_argument("--workspace", nargs=2, metavar=("SRC", "DST"))
+    ap.add_argument("--vars", default="PATH")
+    ap.add_argument("--roots")
     a = ap.parse_args()
+
+    if a.host:
+        from_host(a.host, [n for n in a.vars.split(",") if n], a.roots)
+        return
 
     if a.json:
         env, base_dirs, path = from_json(a.json)

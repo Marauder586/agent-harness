@@ -2,6 +2,7 @@
 
 Usage:
   policy-gen.py --uid UID --gid GID [--conf FILE]... [--host-port PORT]...
+                [--read-write PATH]...
 
 Each allowlist file has one entry per line:
 
@@ -27,6 +28,8 @@ Prints the policy as YAML on stdout.
 
 import argparse
 import ipaddress
+import json
+import os
 import sys
 from typing import NoReturn
 
@@ -85,6 +88,9 @@ def main():
     ap.add_argument("--gid", required=True)
     ap.add_argument("--conf", action="append", default=[])
     ap.add_argument("--host-port", action="append", type=int, default=[])
+    # Extra writable paths, e.g. the project mount. Listed explicitly so a
+    # custom workspace.target outside the workdir (/sandbox) stays writable.
+    ap.add_argument("--read-write", action="append", default=[])
     a = ap.parse_args()
 
     for v in (a.uid, a.gid):
@@ -94,6 +100,14 @@ def main():
     entries = {}
     for c in a.conf:
         parse(c, entries)
+
+    for p in a.read_write:
+        if not p.startswith("/") or "\n" in p or os.path.normpath(p) == "/":
+            die(f"--read-write {p!r}: must be an absolute path other than /")
+    # JSON strings are valid YAML scalars, so any path is quoted safely.
+    read_write = ["/tmp", "/dev/null", "/dev/shm"] + [
+        json.dumps(os.path.normpath(p)) for p in a.read_write
+    ]
 
     host_ports = sorted(set(a.host_port))
     for p in host_ports:
@@ -110,7 +124,7 @@ def main():
         # rule exists, and the harness lives in /nix/store either way.
         "  read_only: [/nix/store, /usr, /lib, /lib64, /bin, /etc, /proc, /dev/urandom]",
         # /dev/shm: Chromium (playwright MCP) needs shared memory.
-        "  read_write: [/tmp, /dev/null, /dev/shm]",
+        f"  read_write: [{', '.join(read_write)}]",
         "landlock:",
         "  compatibility: hard_requirement",
         "process:",

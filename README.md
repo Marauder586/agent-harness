@@ -41,7 +41,7 @@ On home-manager the flake runs the OpenShell gateway for you (`openshell.gateway
 
 The service starts with your session, and each sandboxed run starts it if it isn't running (waiting up to 30 s for the port; on failure the wrapper prints a `journalctl` hint and exits 1). Check it with `systemctl --user status openshell-gateway` and `openshell status` (read its output: the exit code is 0 even when the gateway is unreachable). Logs: `journalctl --user -u openshell-gateway`.
 
-**Your own gateway instead** (a remote gateway, OpenShell's installer, a gateway you already run): set `openshell.gateway.enable = false`, register it with `openshell gateway add`, and check `openshell status`. Its driver must allow bind mounts: the current directory (read-write at `/sandbox/work`), the per-project state directory (read-write at `/sandbox/.persist`, see [Sessions](#sessions)) and, for [dev shells](#dev-shells), the host's `/nix/store` and the captured environment (read-only):
+**Your own gateway instead** (a remote gateway, OpenShell's installer, a gateway you already run): set `openshell.gateway.enable = false`, register it with `openshell gateway add`, and check `openshell status`. Its driver must allow bind mounts: the current directory (read-write at `/sandbox/work/<dirname>`; see `workspace.target`), the per-project state directory (read-write at `/sandbox/.persist`, see [Sessions](#sessions)) and, for [dev shells](#dev-shells), the host's `/nix/store` and the captured environment (read-only):
 
 ```toml
 [openshell.drivers.podman]   # or .docker
@@ -204,7 +204,7 @@ programs.agent-harness.harnesses.claude-code = {
 | `extraArgs` | `[]` | Arguments always passed to the harness. |
 | `host.enable` / `host.command` / `host.extensions` / `host.environment` | off / harness name / `[]` / `{}` | The [unsandboxed host command](#unsandboxed-host-command). `host.command` must differ from `command`. |
 
-Shared options: `secretEnvFiles` (variable name to host file, names validated; see [API keys](#llm-providers)), `openshell.engine` (default `"docker"`; `"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target`, `devshell.auto` (see [Dev shells](#dev-shells)), `image.base` (default: a pinned amd64 `debian:bookworm-slim`) and the read-only `images` (each harness image's stream script).
+Shared options: `secretEnvFiles` (variable name to host file, names validated; see [API keys](#llm-providers)), `openshell.engine` (default `"docker"`; `"docker"` or `"podman"`, must match the gateway's driver; if `docker` on the host is podman's shim, use `"podman"`), `openshell.package`, `workspace.mount` and `workspace.target` (default `null`: the project is mounted at `/sandbox/work/<dirname>`. Hindsight names a project's memory bank after that directory name, so each project gets its own bank. Hindsight's path-based settings (`mapPathToBank`, `optInPaths`) see the sandbox path, not the host path. Set a fixed path to mount every project there; that puts every project in one Hindsight bank), `devshell.auto` (see [Dev shells](#dev-shells)), `hostTools.enable` and `hostTools.variables` (see [Host tools](#host-tools)), `image.base` (default: a pinned amd64 `debian:bookworm-slim`) and the read-only `images` (each harness image's stream script).
 
 ### Gateway
 
@@ -259,7 +259,7 @@ programs.agent-harness.harnesses.pi = {
 
 ### Sessions
 
-The sandbox is deleted on exit, so per-project state lives on the host: `$XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<first 16 hex of sha256(project path)>/` (its `.path` file names the project), mounted read-write at `/sandbox/.persist` and exported to the harness's launch as `$AGENT_HARNESS_PERSIST`. Only harnesses that declare `persists` get the mount (today: Pi, whose sessions live there, so `agent-pi -c`, `agent-pi --resume` and `/resume` work per project). Claude Code doesn't use it yet: its sessions live in `/sandbox/.claude` and are deleted with the sandbox. Every sandbox sees the project as `/sandbox/work`, which is why the directory is keyed by the host path. The agent can read and edit this directory. Sandboxed and host-command sessions stay separate (the host command keeps them under `$XDG_STATE_HOME/agent-harness/pi/agent`). Turn it off with `harnesses.<h>.persist = false`.
+The sandbox is deleted on exit, so per-project state lives on the host: `$XDG_STATE_HOME/agent-harness/<harness>-sandbox/projects/<first 16 hex of sha256(project path)>/` (its `.path` file names the project), mounted read-write at `/sandbox/.persist` and exported to the harness's launch as `$AGENT_HARNESS_PERSIST`. Only harnesses that declare `persists` get the mount (today: Pi, whose sessions live there, so `agent-pi -c`, `agent-pi --resume` and `/resume` work per project). Claude Code doesn't use it yet: its sessions live in `/sandbox/.claude` and are deleted with the sandbox. The directory is keyed by the host path, not by the project's directory name, so two projects with the same name stay apart. The agent can read and edit this directory. Sandboxed and host-command sessions stay separate (the host command keeps them under `$XDG_STATE_HOME/agent-harness/pi/agent`). Turn it off with `harnesses.<h>.persist = false`.
 
 ### Dev shells
 
@@ -291,7 +291,7 @@ The `.envrc` is loaded with `direnv exec "$PWD" env` and compared with `direnv e
 **What is passed in:**
 
 - Dropped: host-session and build-sandbox variables (`HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD`, `OLDPWD`, `SHLVL`, `TERM*`, `COLORTERM`, `DISPLAY`, `WAYLAND_*`, `DBUS_*`, `XDG_*`, `SSH_*`, `GPG_*`, `TZ`, `HOSTNAME`, `PPID`, `UID`, `BASHOPTS`, `SHELLOPTS`, `_`, `NIX_REMOTE`), temp dirs (`TMP`, `TMPDIR`, `TEMP`, `TEMPDIR`, `NIX_BUILD_TOP`), `DIRENV_*`, `__*`, `OPENSHELL_*`, `NIX_ENFORCE_PURITY`, `NIX_LOG_FD`, stdenv's `/no-cert-file.crt` placeholder and names that aren't valid identifiers. With `print-dev-env`, only exported variables.
-- Paths under the project directory are rewritten to `/sandbox/work` (only when `workspace.mount` is true).
+- Paths under the project directory are rewritten to `/sandbox/work/<dirname>`, or to `workspace.target` when set (only when `workspace.mount` is true).
 - `PATH`: the dev shell's new entries go in front of the sandbox PATH. Only `/nix/store` entries and entries inside the project are kept; others (e.g. `~/.cargo/bin`) don't exist in the sandbox and are listed in a notice.
 - **Precedence:** a dev shell variable is set only if the sandbox doesn't already have it, so the image, OpenShell itself, `envFrom` and `secretEnvFiles` win. The harness's `environment` is applied afterwards and wins too.
 
@@ -305,8 +305,32 @@ The `.envrc` is loaded with `direnv exec "$PWD" env` and compared with `direnv e
 
 - There is no Nix daemon in the sandbox: the agent can't `nix build`, `nix develop` or `nix shell`. Add the tools to the dev shell instead.
 - `print-dev-env` (the flake and `--devshell` paths) does not run the dev shell's `shellHook`; direnv's `use flake` does.
-- Tools from outside the Nix store (asdf, pyenv, rustup, Homebrew, `/run/current-system`, `/nix/var/nix/profiles`) don't exist in the sandbox; neither do variables pointing at such paths.
+- Tools from outside the Nix store (asdf, pyenv, rustup, Homebrew) don't exist in the sandbox; neither do variables pointing at such paths. Dev shell entries in `/run/current-system` or `/nix/var/nix/profiles` are dropped too; [host tools](#host-tools) brings in your profiles.
 - Automatic flake detection evaluates the flake on every launch (cached by Nix after the first time); use `--no-devshell` to skip it.
+
+### Host tools
+
+```nix
+programs.agent-harness.hostTools.enable = true;
+```
+
+This puts your own Nix-installed tools in every sandbox: the system profile, home-manager's, `~/.nix-profile`. At each launch the wrapper reads a few path-list variables from your shell (`hostTools.variables`, default `PATH`, `MANPATH`, `INFOPATH`, `XDG_DATA_DIRS`, `TERMINFO_DIRS`, `LOCALE_ARCHIVE`):
+
+1. Each entry is resolved through its symlinks. `/run/current-system/sw/bin`, `/etc/profiles/per-user/<you>/bin` and `~/.nix-profile/bin` all end in a `/nix/store/…/bin` directory.
+2. Only entries that land in `/nix/store` are kept, in order, without duplicates. Everything else doesn't exist in the sandbox and is left out quietly: `/run/wrappers/bin` (setuid `sudo` and friends), `~/.local/bin`, `~/.cargo/bin`, `/usr/bin` on other distributions.
+3. The result goes in the same private file as the dev shell's environment, at `/sandbox/.devshell/host-env`, and the host's `/nix/store` is mounted read-only.
+4. The kept store paths are registered as GC roots for the length of the session (indirect roots in the wrapper's temp dir, gone when it exits). That is done with `nix-store --add-root`, when `nix-store` is on your PATH, so a switch plus garbage collection mid-session can't delete them.
+
+Only the listed variables are read. The rest of your environment, tokens included, never reaches the sandbox this way.
+
+**Precedence:** host PATH entries go **after** the sandbox's own PATH, so they only fill gaps. The harness, the base tools, skill and MCP tools (e.g. the `python3` with `anthropic` that `caveman-compress` needs) and the dev shell all win over a same-named host tool. The other variables are set only where the sandbox and the dev shell left them unset.
+
+**Tradeoffs and limits:**
+
+- The agent can read the whole host Nix store, as with dev shells. Don't keep secrets in it.
+- Host `nix` is on PATH, but there is no Nix daemon in the sandbox and the store is read-only, so `nix build`, `nix develop` and `nix shell` fail. Mounting the daemon socket is deliberately not offered: builds would run on the host, and fixed-output derivations get the host's network, outside the allowlist.
+- Programs that read host `/etc` (`/etc/nix/nix.conf`, `/etc/gitconfig`) see the image's Debian `/etc` instead.
+- The paths are taken at launch. A tool installed while the sandbox runs needs a new session.
 
 ### LLM providers
 
@@ -369,7 +393,8 @@ This gives agents long-term memory from [Hindsight](https://hindsight.vectorize.
 - **Server:** the pinned `hindsight-api` image runs as the systemd user service `agent-hindsight` under rootless podman, on port 9077 (`hindsight.port`). Memory lives in the podman volume `agent-hindsight-data`. The first start pulls a large image (roughly 4 GB), and the server uses on the order of 1.6 GB of RAM (approximate figures).
 - **Models:** embeddings use `BAAI/bge-small-en-v1.5` (33M parameters) and reranking `hindsight-ai/hs-rerank-1` (114M). Both are bundled in the image and run on CPU, offline. Knowledge-bank embeddings reuse bge-small instead of the 744M EmbeddingGemma 2 default.
 - **LLM:** fact extraction and reflection need a chat model. It defaults to `llm.default`. Its provider type is `anthropic` for an `anthropic-messages` default, else `openai`. Override with `hindsight.llm.{provider,baseUrl,model,apiKeyFile}`. With no LLM, the server is not started (rebuilds show a warning), and agents run without memory. A keyless endpoint gets the dummy key `none`, which the server requires. `hindsight.mentalModelRefreshLLMMaxConcurrent` caps how many mental model refresh LLM calls the server runs at once (`HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT`), `hindsight.llmMaxConcurrent` all LLM calls server-wide (`HINDSIGHT_API_LLM_MAX_CONCURRENT`), and `hindsight.{workers,workerMaxSlots}` size the background worker pool and each worker's slots (`HINDSIGHT_API_WORKERS`, `HINDSIGHT_API_WORKER_MAX_SLOTS`); null (the default) uses the server's own default for each.
-- **Agents:** `hindsight.enable` adds the `hindsight` extension to `extensions` of each harness in `hindsight.harnesses` (default: every harness that has one, today `pi`), pointed at `http://host.openshell.internal:9077`. The extension is `extensions/pi/hindsight/`: `dist/pi.js` from the pinned `@vectorize-io/hindsight-coding-agents` npm tarball, plus the helper scripts it spawns. Recall is injected before each turn, and the transcript is saved after it. Agents get `HINDSIGHT_AUTO_UPDATE=false`. `hindsight.maxParallelRetains` caps how many retain (memory-save) queries the extension sends to the server at once (default: the extension's own 10); lower it to soften the burst of extraction LLM calls a session end can trigger. Extra server settings go in `hindsight.extraEnvironment` (`HINDSIGHT_API_*`; not for secrets, since they appear on the podman command line). Pinned: image `hindsight-api` 1.2.3, extension `hindsight-coding-agents` 0.8.8.
+- **Agents:** `hindsight.enable` adds the `hindsight` extension to `extensions` of each harness in `hindsight.harnesses` (default: every harness that has one, today `pi`), pointed at `http://host.openshell.internal:9077`. The extension is `extensions/pi/hindsight/`: `dist/pi.js` from the pinned `@vectorize-io/hindsight-coding-agents` npm tarball, plus the helper scripts it spawns. Recall is injected before each turn, and the transcript is saved after it. Agents get `HINDSIGHT_AUTO_UPDATE=false`. `hindsight.maxParallelRetains` caps how many retain (memory-save) queries the extension sends to the server at once (default: the extension's own 10); lower it to soften the burst of extraction LLM calls a session end can trigger. Extra server settings go in `hindsight.extraEnvironment` (`HINDSIGHT_API_*`; not for secrets, since they appear on the podman command line). Pinned: image `hindsight-api` 1.3.0, extension `hindsight-coding-agents` 0.9.0.
+- **Mental model refreshes:** the extension's pages (Hindsight mental models) refresh on a cron by default. `hindsight.mentalModels.trigger` picks `"cron"` (default), `"auto-refresh"` (after every consolidation, so whenever new memories are processed: most current, one LLM synthesis per page each time) or `"manual"`. `hindsight.mentalModels.cron` sets the schedule (default `"H * * * *"`, UTC). An `H` field gets a per-page value hashed from the bank and page name, so pages don't refresh all at once: `"H H * * *"` is daily. A scheduled tick is skipped when nothing new arrived. Every session re-syncs the extension's existing pages to these settings. They reach the extension as `HINDSIGHT_PAGE_TRIGGER_TYPE` and `HINDSIGHT_PAGE_TRIGGER_CRON`, which a `~/.hindsight/coding-agent.json` on the host would override for host commands. Server side, `hindsight.mentalModels.minRefreshIntervalSeconds` sets a floor between two refreshes of one model, whatever triggered them (`HINDSIGHT_API_MENTAL_MODEL_MIN_REFRESH_INTERVAL_SECONDS`, server default 0). `hindsight.mentalModels.refreshTickSeconds` sets how often the server looks for due cron refreshes (`HINDSIGHT_API_MENTAL_MODEL_REFRESH_TICK_SECONDS`, server default 300). Null leaves the server default.
 - **Dashboard:** `hindsight.dashboard.enable = true` runs the Hindsight Control Plane, the web UI for browsing banks, entities and recall results (`hindsight.dashboard.port`, default 9999). It is a second, stateless container (systemd user service `agent-hindsight-dashboard`, pinned `hindsight-control-plane` image) that proxies the API server-side, so the browser only ever talks to the dashboard. It runs with host networking to reach the API's published port without podman network setup. The dashboard has no login; set `hindsight.dashboard.accessKeyFile` to a file holding an access key. It needs the server (and therefore an LLM) to be configured. Both Hindsight images are pinned by digest in their `image` options.
 - **CLI:** `hindsight.enable` also puts the `hindsight` CLI in your own terminal: the prebuilt release binary, pinned to the same version as the server images. It is preset to the local server with `HINDSIGHT_API_URL=http://127.0.0.1:9077` (follows `hindsight.port`); that variable wins over everything, so set your own (or a `HINDSIGHT_PROFILE`) to reach another server or a Hindsight Cloud bank.
 - **Network:** the port is added to `network.hostPorts`, so this requires `openshell.engine = "podman"` with a rootless gateway.
@@ -399,7 +424,7 @@ The upstream skills are the skill content of the Claude Code plugins in nix-conf
 
 | Name | What it is |
 |---|---|
-| `playwright` | Browser automation with nixpkgs' `playwright-mcp` and its bundled headless Chromium. In the sandbox it runs with `--no-sandbox`, because OpenShell is the isolation boundary, and the browser reaches only the allowlist, plus servers inside the sandbox such as a dev server on localhost. Output goes to `/tmp/playwright-mcp` and is discarded with the sandbox; save under `/sandbox/work` to keep it. The host command keeps Chromium's sandbox and writes output under its state dir. |
+| `playwright` | Browser automation with nixpkgs' `playwright-mcp` and its bundled headless Chromium. In the sandbox it runs with `--no-sandbox`, because OpenShell is the isolation boundary, and the browser reaches only the allowlist, plus servers inside the sandbox such as a dev server on localhost. Output goes to `/tmp/playwright-mcp` and is discarded with the sandbox; save under the project directory to keep it. The host command keeps Chromium's sandbox and writes output under its state dir. |
 | `rea` | [REA](https://github.com/morluto/rea) reverse engineering (roughly 260 tools), from the pinned npm `6.10.1` tarball instead of `npx`, which the allowlist would block. Native engines (Ghidra, Hopper, IDA) and `frida` are not included; add one with `extraPackages`. Static JavaScript and Electron analysis needs none. |
 
 Claude Code gets the selected servers through `--mcp-config`. Pi gets them as `$AGENT_HARNESS_STATE/agent/mcp.json`.

@@ -34,7 +34,7 @@
 
     # See extensions/pi/hindsight/.
     hindsight-coding-agents = {
-      url = "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.8.8.tgz";
+      url = "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.9.0.tgz";
       flake = false;
     };
 

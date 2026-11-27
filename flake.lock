@@ -55,13 +55,13 @@
       "flake": false,
       "locked": {
         "lastModified": 499162500,
-        "narHash": "sha256-zuYTNIDn5XCuSnJjDKxpupjE440Hqw1YrPztLFDfA1s=",
+        "narHash": "sha256-mzputFqShlHiFx0BX5p5f6ml2AzZH290cUoMT5HwVBA=",
         "type": "tarball",
-        "url": "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.8.8.tgz"
+        "url": "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.9.0.tgz"
       },
       "original": {
         "type": "tarball",
-        "url": "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.8.8.tgz"
+        "url": "https://registry.npmjs.org/@vectorize-io/hindsight-coding-agents/-/hindsight-coding-agents-0.9.0.tgz"
       }
     },
     "home-manager": {

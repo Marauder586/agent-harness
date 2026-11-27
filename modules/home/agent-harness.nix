@@ -21,7 +21,8 @@
 #      (lib/policy-gen.py),
 #   3. runs `openshell sandbox create --from <image> --policy <policy>
 #      --no-keep -- agent-launch "$@"`, with $PWD bind-mounted at
-#      /sandbox/work,
+#      /sandbox/work/<dirname> (so the project keeps its name, which
+#      Hindsight and other per-project tools key on),
 #   4. if the project has a dev shell (direnv .envrc, flake devShell, or
 #      `--devshell <installable>`), evaluates it on the host, mounts its
 #      environment (lib/devshell-env.py) and the host's /nix/store
@@ -175,9 +176,13 @@ in {
         # variables the sandbox does not already have, and prepends its PATH.
         # `environment` below still wins.
         if [ -f ${devshellDir}/env ]; then . ${devshellDir}/env; fi
+        # Host tools (hostTools.enable): appended to PATH after the image's
+        # and the dev shell's, so they only fill gaps.
+        if [ -f ${devshellDir}/host-env ]; then . ${devshellDir}/host-env; fi
         if [ -d ${persistDir} ]; then export AGENT_HARNESS_PERSIST=${persistDir}; fi
         ${exports hcfg.environment}
-        cd ${cfg.workspace.target} 2>/dev/null || cd "$HOME"
+        # Set by the wrapper to where it mounted the project.
+        cd "''${AGENT_HARNESS_WORKDIR:-$HOME}" 2>/dev/null || cd "$HOME"
         ${launchScript extensions mcpConfig}
       '';
 
@@ -322,9 +327,19 @@ in {
           # which can hold secrets from the .envrc.
           work=$(mktemp -d -t agent-harness.XXXXXX)
           trap 'rm -rf "$work"' EXIT
+          ${if cfg.workspace.target != null
+            then "ws=${lib.escapeShellArg cfg.workspace.target}"
+            else ''
+              # The project keeps its directory name, which Hindsight names
+              # the memory bank after; a fixed path would put every project
+              # in one bank.
+              ws=/sandbox/work/$(basename "$PWD")
+              [ "$ws" != /sandbox/work// ] || ws=/sandbox/work/root
+            ''}
           policy=$work/policy.yaml
           python3 -I ${policyGen} \
             --uid "$(id -u)" --gid "$(id -g)" \
+            ${lib.optionalString cfg.workspace.mount "--read-write \"$ws\""} \
             --conf ${allowConf} \
             ${lib.concatMapStringsSep " " (p: "--host-port ${toString p}") cfg.network.hostPorts} \
             > "$policy"
@@ -356,11 +371,12 @@ in {
               '. + [{type: "bind", source: $src, target: $dst, read_only: $ro}]' <<<"$mounts")
           }
           ${lib.optionalString cfg.workspace.mount ''
-            addMount "$PWD" ${lib.escapeShellArg cfg.workspace.target} false
+            addMount "$PWD" "$ws" false
+            args+=(--env "AGENT_HARNESS_WORKDIR=$ws")
           ''}
           ${lib.optionalString (hcfg.persist && (def.persists or false)) ''
-            # One directory per project path, so sessions (all recorded under
-            # the same sandbox cwd) stay apart and `--continue` finds them.
+            # One directory per project path, so sessions stay apart and
+            # `--continue` finds them, whatever path the project is mounted at.
             persist="''${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/${name}-sandbox/projects/$(printf %s "$PWD" | sha256sum | cut -c1-16)"
             mkdir -p "$persist"
             printf '%s\n' "$PWD" > "$persist/.path"
@@ -373,7 +389,7 @@ in {
           envFile=$work/devshell/env
           toEnvFile() {
             python3 -I ${devshellEnv} "$@" ${lib.optionalString cfg.workspace.mount
-            "--workspace \"$PWD\" ${lib.escapeShellArg cfg.workspace.target}"} > "$envFile"
+            "--workspace \"$PWD\" \"$ws\""} > "$envFile"
           }
           hostCmd() {
             local bin
@@ -427,6 +443,35 @@ in {
           esac
           if [ -n "$devshellFrom" ] && [ -s "$envFile" ]; then
             echo "agent-harness: dev shell from $devshellFrom (host /nix/store mounted read-only)" >&2
+          else
+            rm -f "$envFile"
+          fi
+          ${lib.optionalString cfg.hostTools.enable ''
+            # Host tools: the listed path-list variables of the user's own
+            # shell (PATH from before runtimeInputs), resolved to /nix/store.
+            # Only those variables are written out, never the rest of the
+            # environment.
+            for v in ${lib.escapeShellArgs cfg.hostTools.variables}; do
+              if [ "$v" = PATH ]; then
+                printf 'PATH=%s\0' "$hostPath"
+              elif [ -n "''${!v+x}" ]; then
+                printf '%s=%s\0' "$v" "''${!v}"
+              fi
+            done > "$work/host.env"
+            python3 -I ${devshellEnv} --host "$work/host.env" \
+              --vars ${lib.escapeShellArg (lib.concatStringsSep "," cfg.hostTools.variables)} \
+              --roots "$work/host.roots" > "$work/devshell/host-env"
+            [ -s "$work/devshell/host-env" ] || rm -f "$work/devshell/host-env"
+            # GC roots for the store paths handed in, so a switch plus
+            # garbage collection during the session cannot delete them. They
+            # are indirect roots in $work, gone when the wrapper exits.
+            if [ -s "$work/host.roots" ] && (PATH=$hostPath; command -v nix-store >/dev/null); then
+              mapfile -t roots < "$work/host.roots"
+              hostCmd nix-store --add-root "$work/gcroot" --indirect --realise "''${roots[@]}" >/dev/null \
+                || echo "agent-harness: could not register GC roots for host tools" >&2
+            fi
+          ''}
+          if [ -s "$envFile" ] || [ -f "$work/devshell/host-env" ]; then
             addMount "$work/devshell" ${devshellDir} true
             addMount /nix/store /nix/store true
           fi
@@ -657,9 +702,35 @@ in {
           '';
         };
         target = lib.mkOption {
-          type = lib.types.str;
-          default = "/sandbox/work";
-          description = "Where the project appears inside the sandbox (also the harness's cwd).";
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/sandbox/work";
+          description = ''
+            Where the project appears inside the sandbox (also the harness's
+            cwd). `null` mounts it at `/sandbox/work/<dirname>`, keeping the
+            directory name: Hindsight names a project's memory bank after the
+            directory, and a fixed path would put every project in one bank.
+          '';
+        };
+      };
+
+      hostTools = {
+        enable = lib.mkEnableOption ''
+          the host's Nix-installed tools in sandboxes. The wrapper reads
+          `hostTools.variables` from your shell, resolves each entry to its
+          /nix/store path (system, home-manager and nix profiles all end
+          there), and appends them to the sandbox's PATH (and sets the other
+          variables where unset). Entries outside /nix/store are left out.
+          Mounts the host's /nix/store read-only: the agent can read every
+          store path, including any secret that ended up in the store'';
+        variables = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*");
+          default = ["PATH" "MANPATH" "INFOPATH" "XDG_DATA_DIRS" "TERMINFO_DIRS" "LOCALE_ARCHIVE"];
+          description = ''
+            Colon-separated path-list variables taken from your shell. Only
+            these are read; nothing else in your environment reaches the
+            sandbox this way.
+          '';
         };
       };
 
